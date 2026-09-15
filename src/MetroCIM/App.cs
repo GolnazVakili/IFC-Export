@@ -6,7 +6,7 @@ namespace MetroCIM;
 
 public sealed class App : IExternalApplication
 {
-    public const string TabName = "MetroCIM";
+    public const string TabName = "Automation";
     public const string PanelName = "Export";
 
     public Result OnStartup(UIControlledApplication application)

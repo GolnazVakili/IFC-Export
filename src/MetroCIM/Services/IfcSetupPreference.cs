@@ -7,7 +7,7 @@ internal static class IfcSetupPreference
         "Autodesk",
         "Revit",
         "Addins",
-        "2027",
+        "2025",
         "MetroCIM",
         "last-ifc-setup.txt");
 
