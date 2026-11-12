@@ -1,7 +1,6 @@
 using Autodesk.Revit.DB;
 using Autodesk.Revit.UI;
 using System.Windows.Forms;
-using RevitTaskDialog = Autodesk.Revit.UI.TaskDialog;
 
 namespace MetroCIM.Commands;
 
@@ -58,8 +57,36 @@ internal static class CommandUi
         return true;
     }
 
-    public static string DefaultBaseName(Autodesk.Revit.DB.View view, Document document) =>
-        SanitizeFileName(string.IsNullOrWhiteSpace(view.Name) ? document.Title : view.Name);
+    public static string DefaultBaseName(Autodesk.Revit.DB.View view, Document document)
+    {
+        string native = NativeProjectName(document);
+        if (!string.IsNullOrWhiteSpace(native))
+            return SanitizeFileName(native);
+
+        return SanitizeFileName(string.IsNullOrWhiteSpace(view.Name) ? "export" : view.Name);
+    }
+
+    public static string NativeProjectName(Document document)
+    {
+        try
+        {
+            if (!string.IsNullOrWhiteSpace(document.PathName))
+            {
+                string fromFile = Path.GetFileNameWithoutExtension(document.PathName);
+                if (!string.IsNullOrWhiteSpace(fromFile))
+                    return fromFile;
+            }
+        }
+        catch (Autodesk.Revit.Exceptions.ApplicationException)
+        {
+        }
+
+        string title = document.Title ?? string.Empty;
+        if (title.EndsWith(".rvt", StringComparison.OrdinalIgnoreCase))
+            title = title[..^4];
+
+        return title.Trim();
+    }
 
     public static string? PickSavePath(string title, string filter, string fileName)
     {
@@ -86,23 +113,26 @@ internal static class CommandUi
 
     public static void Show(string title, string body)
     {
-        var dialog = new RevitTaskDialog(title)
-        {
-            MainInstruction = title,
-            MainContent = body,
-            CommonButtons = TaskDialogCommonButtons.Ok
-        };
-        dialog.Show();
+        using var form = new System.Windows.Forms.Form();
+        DialogStyle.Apply(form, title);
+        form.Controls.Add(DialogStyle.BodyLabel(body));
+        Button ok = DialogStyle.CommandButton("OK", DialogResult.OK);
+        DialogStyle.AddButtons(form, ok);
+        form.AcceptButton = ok;
+        form.CancelButton = ok;
+        form.ShowDialog();
     }
 
     public static bool Confirm(string title, string body)
     {
-        var dialog = new RevitTaskDialog(title)
-        {
-            MainInstruction = title,
-            MainContent = body,
-            CommonButtons = TaskDialogCommonButtons.Yes | TaskDialogCommonButtons.No
-        };
-        return dialog.Show() == TaskDialogResult.Yes;
+        using var form = new System.Windows.Forms.Form();
+        DialogStyle.Apply(form, title);
+        form.Controls.Add(DialogStyle.BodyLabel(body));
+        Button yes = DialogStyle.CommandButton("Yes", DialogResult.Yes);
+        Button no = DialogStyle.CommandButton("No", DialogResult.No);
+        DialogStyle.AddButtons(form, yes, no);
+        form.AcceptButton = yes;
+        form.CancelButton = no;
+        return form.ShowDialog() == DialogResult.Yes;
     }
 }

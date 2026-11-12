@@ -154,14 +154,22 @@ public sealed class IfcExporter
         {
             colorsByIfcGuid = IfcAppearanceApplier.Apply(document, view);
             appliedAppearance = colorsByIfcGuid.Count > 0;
-            exported = document.Export(folder, name, options);
-            if (IfcExportPath.IsEmpty(IfcExportPath.FindWrittenFile(path)))
-                exported = document.Export(folder, Path.GetFileName(path), options);
-            if (IfcExportPath.IsEmpty(IfcExportPath.FindWrittenFile(path)) &&
-                options.FilterViewId != ElementId.InvalidElementId)
+            bool? lightSourcesHidden = HideLightSources(view);
+            try
             {
-                ClearViewFilter(options);
                 exported = document.Export(folder, name, options);
+                if (IfcExportPath.IsEmpty(IfcExportPath.FindWrittenFile(path)))
+                    exported = document.Export(folder, Path.GetFileName(path), options);
+                if (IfcExportPath.IsEmpty(IfcExportPath.FindWrittenFile(path)) &&
+                    options.FilterViewId != ElementId.InvalidElementId)
+                {
+                    ClearViewFilter(options);
+                    exported = document.Export(folder, name, options);
+                }
+            }
+            finally
+            {
+                RestoreLightSources(view, lightSourcesHidden);
             }
 
             IfcAppearanceApplier.HarvestStoredGuids(document, view, colorsByIfcGuid);
@@ -231,6 +239,39 @@ public sealed class IfcExporter
         }
 
         return IfcExportOutcome.Succeeded(setupName, path);
+    }
+
+    private static bool? HideLightSources(View view)
+    {
+        ElementId categoryId = new((long)BuiltInCategory.OST_LightingFixtureSource);
+        try
+        {
+            if (!view.CanCategoryBeHidden(categoryId))
+                return null;
+
+            bool hidden = view.GetCategoryHidden(categoryId);
+            if (!hidden)
+                view.SetCategoryHidden(categoryId, true);
+            return hidden;
+        }
+        catch (Autodesk.Revit.Exceptions.ApplicationException)
+        {
+            return null;
+        }
+    }
+
+    private static void RestoreLightSources(View view, bool? wasHidden)
+    {
+        if (wasHidden is null)
+            return;
+
+        try
+        {
+            view.SetCategoryHidden(new ElementId((long)BuiltInCategory.OST_LightingFixtureSource), wasHidden.Value);
+        }
+        catch (Autodesk.Revit.Exceptions.ApplicationException)
+        {
+        }
     }
 
     private static void NormalizeOptions(IFCExportOptions options, View view, string path)

@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8" standalone="no"?>
 <RevitAddIns>
   <AddIn Type="Application">
-    <Name>MetroCIM</Name>
+    <Name>Export</Name>
     <Assembly>MetroCIM\MetroCIM.dll</Assembly>
     <FullClassName>MetroCIM.App</FullClassName>
     <ClientId>8e4c2b91-6a17-4f3d-9e50-2c8a7b4d1f60</ClientId>

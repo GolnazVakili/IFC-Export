@@ -37,7 +37,7 @@ public sealed class ExportIfcCommand : IExternalCommand
                 IfcExportOutcome fallback;
                 using (var progress = new ExportProgress(Title, 1))
                 {
-                    progress.UseMarquee("Exporting IFC with IFC4 Reference View");
+                    progress.UseMarquee("Exporting IFC" + Environment.NewLine + "IFC4 Reference View");
                     fallback = IfcExporter.ExportVisibleView(document, view, fallbackPath);
                 }
 
@@ -67,7 +67,7 @@ public sealed class ExportIfcCommand : IExternalCommand
             IfcExportOutcome outcome;
             using (var progress = new ExportProgress(Title, 1))
             {
-                progress.UseMarquee($"Exporting IFC with setup: {setupName}");
+                progress.UseMarquee("Exporting IFC" + Environment.NewLine + setupName);
                 outcome = exporter.Export(document, view, outputPath, setupName);
             }
 

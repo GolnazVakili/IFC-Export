@@ -8,6 +8,8 @@ public sealed class GeometryBuilder
 {
     private const double FeetToMeters = 0.3048;
     private readonly Dictionary<string, List<(XYZ A, XYZ B, XYZ C)>> _symbolCache = [];
+    private readonly Dictionary<ElementId, bool> _lightSourceStyles = [];
+    private Document? _document;
 
     public void ClearCache() => _symbolCache.Clear();
 
@@ -41,7 +43,16 @@ public sealed class GeometryBuilder
         };
 
         var mesh = new TriangleMesh();
-        Collect(geometry, Transform.Identity, mesh, lod);
+        _document = element.Document;
+        try
+        {
+            Collect(geometry, Transform.Identity, mesh, lod);
+        }
+        finally
+        {
+            _document = null;
+        }
+
         return mesh.IsEmpty ? null : mesh;
     }
 
@@ -49,6 +60,9 @@ public sealed class GeometryBuilder
     {
         foreach (GeometryObject obj in geometry)
         {
+            if (IsLightSource(obj))
+                continue;
+
             switch (obj)
             {
                 case Solid solid:
@@ -69,6 +83,9 @@ public sealed class GeometryBuilder
 
     private void AddInstance(GeometryInstance instance, Transform transform, TriangleMesh mesh, double lod)
     {
+        if (IsLightSource(instance))
+            return;
+
         Transform world = transform.Multiply(instance.Transform);
         string? key = TrySymbolCacheKey(instance);
 
@@ -115,7 +132,7 @@ public sealed class GeometryBuilder
         }
     }
 
-    private static void CollectSymbol(
+    private void CollectSymbol(
         GeometryElement geometry,
         Transform transform,
         List<(XYZ A, XYZ B, XYZ C)> triangles,
@@ -123,6 +140,9 @@ public sealed class GeometryBuilder
     {
         foreach (GeometryObject obj in geometry)
         {
+            if (IsLightSource(obj))
+                continue;
+
             switch (obj)
             {
                 case Solid solid:
@@ -147,6 +167,60 @@ public sealed class GeometryBuilder
                     break;
             }
         }
+    }
+
+    private bool IsLightSource(GeometryObject geometry)
+    {
+        if (_document is null)
+            return false;
+
+        ElementId styleId;
+        try
+        {
+            styleId = geometry.GraphicsStyleId;
+        }
+        catch (Autodesk.Revit.Exceptions.ApplicationException)
+        {
+            return false;
+        }
+
+        if (styleId == ElementId.InvalidElementId)
+            return false;
+
+        if (_lightSourceStyles.TryGetValue(styleId, out bool cached))
+            return cached;
+
+        bool lightSource = false;
+        try
+        {
+            if (_document.GetElement(styleId) is GraphicsStyle style)
+                lightSource = IsLightSourceCategory(style.GraphicsStyleCategory);
+        }
+        catch (Autodesk.Revit.Exceptions.ApplicationException)
+        {
+            lightSource = false;
+        }
+
+        _lightSourceStyles[styleId] = lightSource;
+        return lightSource;
+    }
+
+    internal static bool IsLightSourceCategory(Category? category)
+    {
+        if (category is null)
+            return false;
+
+        try
+        {
+            if (category.Id.Value == (long)BuiltInCategory.OST_LightingFixtureSource)
+                return true;
+        }
+        catch (Autodesk.Revit.Exceptions.ApplicationException)
+        {
+        }
+
+        string name = category.Name ?? string.Empty;
+        return name.Contains("Light Source", StringComparison.OrdinalIgnoreCase);
     }
 
     private static void AddSolid(Solid solid, Transform transform, TriangleMesh mesh, double lod)

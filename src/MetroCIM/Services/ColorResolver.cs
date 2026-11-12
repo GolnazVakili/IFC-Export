@@ -9,6 +9,7 @@ public sealed class ColorResolver
 {
     private readonly MepSystemTypeColor _systems = new();
     private readonly Dictionary<ElementId, ResolvedAppearance> _byElement = [];
+    private readonly Dictionary<ElementId, HashSet<ElementId>?> _filterPasses = [];
     private IList<(FilterElement Filter, OverrideGraphicSettings Overrides)> _activeFilters = [];
     private View3D? _boundView;
 
@@ -16,6 +17,7 @@ public sealed class ColorResolver
     {
         _boundView = view;
         _byElement.Clear();
+        _filterPasses.Clear();
         _activeFilters = [];
         try
         {
@@ -252,19 +254,17 @@ public sealed class ColorResolver
         return ResolvedAppearance.Default;
     }
 
-    private static bool ElementPassesFilter(Element element, FilterElement filter)
+    private bool ElementPassesFilter(Element element, FilterElement filter)
     {
         try
         {
             switch (filter)
             {
                 case ParameterFilterElement parameterFilter:
-                    ICollection<ElementId> categories = parameterFilter.GetCategories();
-                    if (element.Category is null || !categories.Contains(element.Category.Id))
+                    if (!CategoryMatches(parameterFilter, element))
                         return false;
 
-                    ElementFilter? rules = parameterFilter.GetElementFilter();
-                    return rules is null || rules.PassesFilter(element);
+                    return ElementPassesRules(parameterFilter, element);
 
                 case SelectionFilterElement selectionFilter:
                     return selectionFilter.GetElementIds().Contains(element.Id);
@@ -276,6 +276,72 @@ public sealed class ColorResolver
         catch (Autodesk.Revit.Exceptions.ApplicationException)
         {
             return false;
+        }
+    }
+
+    private static bool CategoryMatches(ParameterFilterElement filter, Element element)
+    {
+        if (element.Category is null)
+            return false;
+
+        ICollection<ElementId> categories = filter.GetCategories();
+        if (categories.Contains(element.Category.Id))
+            return true;
+
+        try
+        {
+            Category? parent = element.Category.Parent;
+            return parent is not null && categories.Contains(parent.Id);
+        }
+        catch (Autodesk.Revit.Exceptions.ApplicationException)
+        {
+            return false;
+        }
+    }
+
+    private bool ElementPassesRules(ParameterFilterElement filter, Element element)
+    {
+        if (!_filterPasses.TryGetValue(filter.Id, out HashSet<ElementId>? passing))
+        {
+            passing = TryCollectPassingIds(filter);
+            _filterPasses[filter.Id] = passing;
+        }
+
+        if (passing is not null)
+            return passing.Contains(element.Id);
+
+        try
+        {
+            ElementFilter? rules = filter.GetElementFilter();
+            if (rules is null)
+                return true;
+
+            return rules.PassesFilter(element.Document, element.Id) || rules.PassesFilter(element);
+        }
+        catch (Autodesk.Revit.Exceptions.ApplicationException)
+        {
+            return false;
+        }
+    }
+
+    private HashSet<ElementId>? TryCollectPassingIds(ParameterFilterElement filter)
+    {
+        if (_boundView is null)
+            return null;
+
+        try
+        {
+            var collector = new FilteredElementCollector(_boundView.Document, _boundView.Id)
+                .WhereElementIsNotElementType();
+            ElementFilter? rules = filter.GetElementFilter();
+            if (rules is not null)
+                collector.WherePasses(rules);
+
+            return collector.ToElementIds().ToHashSet();
+        }
+        catch (Autodesk.Revit.Exceptions.ApplicationException)
+        {
+            return null;
         }
     }
 
@@ -379,15 +445,46 @@ public sealed class ColorResolver
 
     private static bool TryGetSurfaceColor(OverrideGraphicSettings settings, out ResolvedAppearance appearance)
     {
-        if (TryFromRevitColor(settings.SurfaceForegroundPatternColor, settings.Transparency, out appearance))
+        if (HasPatternOverride(settings.SurfaceForegroundPatternId) &&
+            settings.IsSurfaceForegroundPatternVisible &&
+            TryFromRevitColor(settings.SurfaceForegroundPatternColor, settings.Transparency, out appearance))
+        {
+            return true;
+        }
+
+        if (HasPatternOverride(settings.SurfaceBackgroundPatternId) &&
+            settings.IsSurfaceBackgroundPatternVisible &&
+            TryFromRevitColor(settings.SurfaceBackgroundPatternColor, settings.Transparency, out appearance))
+        {
+            return true;
+        }
+
+        if (HasPatternOverride(settings.CutForegroundPatternId) &&
+            settings.IsCutForegroundPatternVisible &&
+            TryFromRevitColor(settings.CutForegroundPatternColor, settings.Transparency, out appearance))
+        {
+            return true;
+        }
+
+        if (HasPatternOverride(settings.CutBackgroundPatternId) &&
+            settings.IsCutBackgroundPatternVisible &&
+            TryFromRevitColor(settings.CutBackgroundPatternColor, settings.Transparency, out appearance))
+        {
+            return true;
+        }
+
+        if (TryFromRevitColor(settings.ProjectionLineColor, settings.Transparency, out appearance))
             return true;
 
-        if (TryFromRevitColor(settings.CutForegroundPatternColor, settings.Transparency, out appearance))
+        if (TryFromRevitColor(settings.CutLineColor, settings.Transparency, out appearance))
             return true;
 
         appearance = default;
         return false;
     }
+
+    private static bool HasPatternOverride(ElementId patternId) =>
+        patternId != ElementId.InvalidElementId;
 
     private static bool TryGetTransparency(OverrideGraphicSettings settings, out int transparency)
     {
