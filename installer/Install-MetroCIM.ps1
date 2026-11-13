@@ -276,30 +276,38 @@ function Show-ExportDialog {
 
     $form = New-Object System.Windows.Forms.Form
     $form.Text = $Title
-    $form.Font = New-Object System.Drawing.Font('Segoe UI', 7)
-    $form.ClientSize = New-Object System.Drawing.Size(380, 120)
+    $form.Font = New-Object System.Drawing.Font('Segoe UI', 10)
+    $form.AutoScaleMode = [System.Windows.Forms.AutoScaleMode]::Dpi
     $form.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::FixedDialog
     $form.MaximizeBox = $false
     $form.MinimizeBox = $false
     $form.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterScreen
     $form.ShowInTaskbar = $false
+    $form.BackColor = [System.Drawing.Color]::White
 
     $label = New-Object System.Windows.Forms.Label
     $label.Text = $Message
-    $label.Dock = [System.Windows.Forms.DockStyle]::Fill
-    $label.TextAlign = [System.Drawing.ContentAlignment]::MiddleLeft
-    $label.Padding = New-Object System.Windows.Forms.Padding(12, 12, 12, 4)
+    $label.Font = $form.Font
+    $label.ForeColor = [System.Drawing.Color]::Black
+    $label.AutoSize = $true
+    $label.MaximumSize = New-Object System.Drawing.Size(440, 0)
+    $label.Location = New-Object System.Drawing.Point(20, 18)
     $form.Controls.Add($label)
 
+    $buttonWidth = 108
+    $buttonHeight = 32
     $bar = New-Object System.Windows.Forms.Panel
     $bar.Dock = [System.Windows.Forms.DockStyle]::Bottom
-    $bar.Height = 21 + 12 + 6
-    $x = 380 - 12 - 64
+    $bar.Height = 56
+    $bar.BackColor = [System.Drawing.Color]::White
+    $x = 480 - 20 - $buttonWidth
     for ($i = $Buttons.Count - 1; $i -ge 0; $i--) {
         $button = New-Object System.Windows.Forms.Button
         $button.Text = $Buttons[$i]
-        $button.Size = New-Object System.Drawing.Size(64, 21)
-        $button.Location = New-Object System.Drawing.Point($x, 6)
+        $button.Font = $form.Font
+        $button.Size = New-Object System.Drawing.Size($buttonWidth, $buttonHeight)
+        $button.Location = New-Object System.Drawing.Point($x, 12)
+        $button.UseVisualStyleBackColor = $true
         $button.Add_Click({
                 $form.Tag = $this.Text
                 $form.Close()
@@ -311,10 +319,12 @@ function Show-ExportDialog {
             $form.CancelButton = $button
         }
         $bar.Controls.Add($button)
-        $x -= 64 + 6
+        $x -= $buttonWidth + 8
     }
 
     $form.Controls.Add($bar)
+    $form.Controls.SetChildIndex($bar, 0)
+    $form.ClientSize = New-Object System.Drawing.Size(480, ($label.Bottom + 16 + $bar.Height))
     [void]$form.ShowDialog()
     $chosen = [string]$form.Tag
     $form.Dispose()
@@ -342,7 +352,19 @@ function Show-Warning([string]$Message) {
 if (-not $Silent) {
     Add-Type -AssemblyName System.Windows.Forms
     Add-Type -AssemblyName System.Drawing
+    if (-not ('ExportDpi' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System.Runtime.InteropServices;
+public static class ExportDpi {
+    [DllImport("user32.dll")]
+    public static extern bool SetProcessDPIAware();
+}
+'@
+    }
+
+    [void][ExportDpi]::SetProcessDPIAware()
     [System.Windows.Forms.Application]::EnableVisualStyles()
+    [System.Windows.Forms.Application]::SetCompatibleTextRenderingDefault($false)
 }
 
 if ($Silent -and $Uninstall) {
@@ -393,58 +415,86 @@ catch {
 
 $form = New-Object System.Windows.Forms.Form
 $form.Text = 'Export Setup'
-$form.Font = New-Object System.Drawing.Font('Segoe UI', 7)
+$form.Font = New-Object System.Drawing.Font('Segoe UI', 10)
+$form.AutoScaleMode = [System.Windows.Forms.AutoScaleMode]::Dpi
 $form.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::FixedDialog
 $form.MaximizeBox = $false
 $form.MinimizeBox = $false
 $form.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterScreen
-$form.ClientSize = New-Object System.Drawing.Size(380, 120)
+$form.BackColor = [System.Drawing.Color]::White
+
+$heading = New-Object System.Windows.Forms.Label
+$heading.Text = 'Export'
+$heading.Font = New-Object System.Drawing.Font('Segoe UI', 16, [System.Drawing.FontStyle]::Bold)
+$heading.ForeColor = [System.Drawing.Color]::Black
+$heading.AutoSize = $true
+$heading.Location = New-Object System.Drawing.Point(20, 16)
+$form.Controls.Add($heading)
 
 $body = New-Object System.Windows.Forms.Label
-$body.Text = 'Installs Export glTF, Export XKT, and Export IFC on the Automation tab for the current Windows user.'
-$body.Location = New-Object System.Drawing.Point(12, 12)
-$body.Size = New-Object System.Drawing.Size(356, 36)
+$body.Text = "Installs Export glTF, Export XKT, and Export IFC on the Automation tab for the current Windows user."
+$body.Font = $form.Font
+$body.ForeColor = [System.Drawing.Color]::FromArgb(32, 32, 32)
+$body.AutoSize = $true
+$body.MaximumSize = New-Object System.Drawing.Size(460, 0)
+$body.Location = New-Object System.Drawing.Point(20, ($heading.Bottom + 12))
 $form.Controls.Add($body)
 
 $pathLabel = New-Object System.Windows.Forms.Label
 $pathLabel.Text = "Folder: $target"
-$pathLabel.AutoEllipsis = $true
-$pathLabel.Location = New-Object System.Drawing.Point(12, 52)
-$pathLabel.Size = New-Object System.Drawing.Size(356, 16)
+$pathLabel.Font = $form.Font
+$pathLabel.ForeColor = [System.Drawing.Color]::FromArgb(32, 32, 32)
+$pathLabel.AutoSize = $true
+$pathLabel.MaximumSize = New-Object System.Drawing.Size(460, 0)
+$pathLabel.Location = New-Object System.Drawing.Point(20, ($body.Bottom + 14))
 $form.Controls.Add($pathLabel)
 
 $status = New-Object System.Windows.Forms.Label
 $status.Text = if ($payloadError) { $payloadError } else { 'Ready to install.' }
-$status.Location = New-Object System.Drawing.Point(12, 70)
-$status.Size = New-Object System.Drawing.Size(356, 20)
+$status.Font = New-Object System.Drawing.Font('Segoe UI', 10, [System.Drawing.FontStyle]::Bold)
+$status.ForeColor = [System.Drawing.Color]::Black
+$status.AutoSize = $true
+$status.MaximumSize = New-Object System.Drawing.Size(460, 0)
+$status.Location = New-Object System.Drawing.Point(20, ($pathLabel.Bottom + 10))
 $form.Controls.Add($status)
 
 $buttonBar = New-Object System.Windows.Forms.Panel
 $buttonBar.Dock = [System.Windows.Forms.DockStyle]::Bottom
-$buttonBar.Height = 39
+$buttonBar.Height = 64
+$buttonBar.BackColor = [System.Drawing.Color]::White
 
-$installButton = New-Object System.Windows.Forms.Button
-$installButton.Text = 'Install'
-$installButton.Location = New-Object System.Drawing.Point(164, 6)
-$installButton.Size = New-Object System.Drawing.Size(64, 21)
-$installButton.Enabled = [string]::IsNullOrWhiteSpace($payloadError)
-$buttonBar.Controls.Add($installButton)
-$form.AcceptButton = $installButton
+$buttonWidth = 108
+$buttonHeight = 34
+$closeButton = New-Object System.Windows.Forms.Button
+$closeButton.Text = 'Close'
+$closeButton.Font = $form.Font
+$closeButton.Size = New-Object System.Drawing.Size($buttonWidth, $buttonHeight)
+$closeButton.Location = New-Object System.Drawing.Point((500 - 20 - $buttonWidth), 14)
+$closeButton.UseVisualStyleBackColor = $true
+$closeButton.Add_Click({ $form.Close() })
+$buttonBar.Controls.Add($closeButton)
 
 $uninstallButton = New-Object System.Windows.Forms.Button
 $uninstallButton.Text = 'Uninstall'
-$uninstallButton.Location = New-Object System.Drawing.Point(234, 6)
-$uninstallButton.Size = New-Object System.Drawing.Size(64, 21)
+$uninstallButton.Font = $form.Font
+$uninstallButton.Size = New-Object System.Drawing.Size($buttonWidth, $buttonHeight)
+$uninstallButton.Location = New-Object System.Drawing.Point(($closeButton.Left - 8 - $buttonWidth), 14)
+$uninstallButton.UseVisualStyleBackColor = $true
 $buttonBar.Controls.Add($uninstallButton)
 
-$closeButton = New-Object System.Windows.Forms.Button
-$closeButton.Text = 'Close'
-$closeButton.Location = New-Object System.Drawing.Point(304, 6)
-$closeButton.Size = New-Object System.Drawing.Size(64, 21)
-$closeButton.Add_Click({ $form.Close() })
-$buttonBar.Controls.Add($closeButton)
-$form.Controls.Add($buttonBar)
+$installButton = New-Object System.Windows.Forms.Button
+$installButton.Text = 'Install'
+$installButton.Font = $form.Font
+$installButton.Size = New-Object System.Drawing.Size($buttonWidth, $buttonHeight)
+$installButton.Location = New-Object System.Drawing.Point(($uninstallButton.Left - 8 - $buttonWidth), 14)
+$installButton.UseVisualStyleBackColor = $true
+$installButton.Enabled = [string]::IsNullOrWhiteSpace($payloadError)
+$buttonBar.Controls.Add($installButton)
+$form.AcceptButton = $installButton
 $form.CancelButton = $closeButton
+$form.Controls.Add($buttonBar)
+$form.Controls.SetChildIndex($buttonBar, 0)
+$form.ClientSize = New-Object System.Drawing.Size(500, ($status.Bottom + 18 + $buttonBar.Height))
 
 $installButton.Add_Click({
         $installButton.Enabled = $false

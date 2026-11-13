@@ -21,13 +21,13 @@ Shared UI lives in `CommandUi`. Shared mesh + glTF write lives in `ViewExporter`
 Use **surface / fill** colors, never projection-line color, as mesh albedo.
 
 1. View filter surface overrides — `GetOrderedFilters()`, `GetFilterOverrides`
-2. Element **surface** overrides (category overrides are skipped for pipes so they cannot hide system-type material)
-3. Color fill scheme **unless** it is driven by pipe physical material
-4. **`MepSystemTypeColor`**: `PipingSystemType.MaterialId` (never pipe/`PipeType` material), then system FillColor, then LineColor
-5. Never pipe segment material, pipe type material, `RBS_PIPE_MATERIAL_PARAM`, or `element.GetMaterialIds()` on pipes
+2. Element **surface** overrides (category overrides are skipped for pipes and for every fitting and accessory so they cannot hide system-type material)
+3. Color fill scheme **unless** it is driven by physical material
+4. **`MepSystemTypeColor`**: system-type material (never the fitting, accessory, or segment/type material), then system FillColor, then LineColor
+5. Never segment material, type material, `RBS_PIPE_MATERIAL_PARAM`, or `element.GetMaterialIds()` on pipes or on fittings and accessories
 6. Other categories: non-black element materials, else a neutral default
 
-`PipeInsulation` / other `InsulationLiningBase` elements inherit appearance from `HostElementId` so insulated pipes match system-type colors. Pipe fittings and accessories use the connected pipe’s system type when they have no system parameter of their own. Pipe fittings and accessories use the connected pipe’s system type when they have no system parameter of their own.
+View filters are tested on the element the filter is assigned to. Every fitting and accessory (pipe, duct, conduit, cable tray, and any category whose name contains "Fitting" or "Accessory") uses that same order and does not inherit a host color before the filter test. `PipeInsulation` / other `InsulationLiningBase` elements inherit appearance from `HostElementId` only after their own filter misses. Fittings and accessories use the connected system type when they have no system parameter of their own.
 
 ## Geometry and glTF
 - `element.get_Geometry(new Options { View = view })`

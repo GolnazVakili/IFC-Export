@@ -10,6 +10,7 @@ public sealed class GeometryBuilder
     private readonly Dictionary<string, List<(XYZ A, XYZ B, XYZ C)>> _symbolCache = [];
     private readonly Dictionary<ElementId, bool> _lightSourceStyles = [];
     private Document? _document;
+    private bool _dropDeviceCones;
 
     public void ClearCache() => _symbolCache.Clear();
 
@@ -44,6 +45,7 @@ public sealed class GeometryBuilder
 
         var mesh = new TriangleMesh();
         _document = element.Document;
+        _dropDeviceCones = IsDeviceCategory(element);
         try
         {
             Collect(geometry, Transform.Identity, mesh, lod);
@@ -51,6 +53,7 @@ public sealed class GeometryBuilder
         finally
         {
             _document = null;
+            _dropDeviceCones = false;
         }
 
         return mesh.IsEmpty ? null : mesh;
@@ -65,7 +68,7 @@ public sealed class GeometryBuilder
 
             switch (obj)
             {
-                case Solid solid:
+                case Solid solid when !IsDroppedDeviceCone(solid):
                     AddSolid(solid, transform, mesh, lod);
                     break;
                 case Mesh revitMesh:
@@ -115,7 +118,7 @@ public sealed class GeometryBuilder
             Collect(instanceGeometry, transform, mesh, lod);
     }
 
-    private static string? TrySymbolCacheKey(GeometryInstance instance)
+    private string? TrySymbolCacheKey(GeometryInstance instance)
     {
         try
         {
@@ -124,7 +127,10 @@ public sealed class GeometryBuilder
                 return null;
 
             long symbolId = geometryId.SymbolId.Value;
-            return symbolId == 0 ? null : symbolId.ToString();
+            if (symbolId == 0)
+                return null;
+
+            return _dropDeviceCones ? symbolId + ":nocon" : symbolId.ToString();
         }
         catch (Autodesk.Revit.Exceptions.ApplicationException)
         {
@@ -145,7 +151,7 @@ public sealed class GeometryBuilder
 
             switch (obj)
             {
-                case Solid solid:
+                case Solid solid when !IsDroppedDeviceCone(solid):
                     AddSolidSymbol(solid, transform, triangles, lod);
                     break;
                 case Mesh revitMesh:
@@ -207,20 +213,167 @@ public sealed class GeometryBuilder
 
     internal static bool IsLightSourceCategory(Category? category)
     {
-        if (category is null)
-            return false;
+        for (int depth = 0; category is not null && depth < 6; depth++)
+        {
+            try
+            {
+                if (category.Id.Value == (long)BuiltInCategory.OST_LightingFixtureSource)
+                    return true;
+            }
+            catch (Autodesk.Revit.Exceptions.ApplicationException)
+            {
+            }
 
+            string name = category.Name ?? string.Empty;
+            if (name.Contains("Light Source", StringComparison.OrdinalIgnoreCase))
+                return true;
+
+            try
+            {
+                category = category.Parent;
+            }
+            catch (Autodesk.Revit.Exceptions.ApplicationException)
+            {
+                return false;
+            }
+        }
+
+        return false;
+    }
+
+    private bool IsDroppedDeviceCone(Solid solid) =>
+        _dropDeviceCones && IsConeOrPyramid(solid);
+
+    internal static bool IsDeviceCategory(Element element)
+    {
+        BuiltInCategory category = BuiltInCategory.INVALID;
         try
         {
-            if (category.Id.Value == (long)BuiltInCategory.OST_LightingFixtureSource)
-                return true;
+            if (element.Category is not null)
+                category = element.Category.BuiltInCategory;
         }
         catch (Autodesk.Revit.Exceptions.ApplicationException)
         {
+            category = BuiltInCategory.INVALID;
         }
 
-        string name = category.Name ?? string.Empty;
-        return name.Contains("Light Source", StringComparison.OrdinalIgnoreCase);
+        return category is
+            BuiltInCategory.OST_LightingFixtures or
+            BuiltInCategory.OST_ElectricalFixtures or
+            BuiltInCategory.OST_ElectricalEquipment or
+            BuiltInCategory.OST_LightingDevices or
+            BuiltInCategory.OST_SecurityDevices or
+            BuiltInCategory.OST_FireAlarmDevices or
+            BuiltInCategory.OST_DataDevices or
+            BuiltInCategory.OST_CommunicationDevices or
+            BuiltInCategory.OST_TelephoneDevices or
+            BuiltInCategory.OST_NurseCallDevices;
+    }
+
+    internal static bool IsConeOrPyramid(Solid solid)
+    {
+        if (solid.Faces.IsEmpty || solid.Faces.Size is < 4 or > 48)
+            return false;
+
+        PlanarFace? baseFace = null;
+        var triangles = new List<PlanarFace>();
+        foreach (Face face in solid.Faces)
+        {
+            if (face is not PlanarFace planar)
+                return false;
+
+            int edges = EdgeCount(planar);
+            if (edges > 3)
+            {
+                if (baseFace is not null)
+                    return false;
+
+                baseFace = planar;
+            }
+            else if (edges == 3)
+            {
+                triangles.Add(planar);
+            }
+            else
+            {
+                return false;
+            }
+        }
+
+        if (baseFace is null || triangles.Count < 3)
+            return false;
+
+        var apexCounts = new List<(XYZ Point, int Count)>();
+        foreach (PlanarFace triangle in triangles)
+        {
+            foreach (XYZ point in FacePoints(triangle))
+            {
+                int index = apexCounts.FindIndex(entry => entry.Point.DistanceTo(point) < 1e-4);
+                if (index < 0)
+                    apexCounts.Add((point, 1));
+                else
+                    apexCounts[index] = (apexCounts[index].Point, apexCounts[index].Count + 1);
+            }
+        }
+
+        if (apexCounts.Count == 0)
+            return false;
+
+        (XYZ Point, int Count) apex = apexCounts.OrderByDescending(entry => entry.Count).First();
+        if (apex.Count < triangles.Count)
+            return false;
+
+        XYZ origin = baseFace.Origin;
+        XYZ normal = baseFace.FaceNormal;
+        return Math.Abs((apex.Point - origin).DotProduct(normal)) > 1e-3;
+    }
+
+    private static int EdgeCount(Face face)
+    {
+        try
+        {
+            EdgeArrayArray loops = face.EdgeLoops;
+            if (loops.Size == 0)
+                return 0;
+
+            return loops.get_Item(0).Size;
+        }
+        catch (Autodesk.Revit.Exceptions.ApplicationException)
+        {
+            return 0;
+        }
+    }
+
+    private static IEnumerable<XYZ> FacePoints(Face face)
+    {
+        EdgeArray loop;
+        try
+        {
+            if (face.EdgeLoops.Size == 0)
+                yield break;
+
+            loop = face.EdgeLoops.get_Item(0);
+        }
+        catch (Autodesk.Revit.Exceptions.ApplicationException)
+        {
+            yield break;
+        }
+
+        foreach (Edge edge in loop)
+        {
+            Curve? curve;
+            try
+            {
+                curve = edge.AsCurve();
+            }
+            catch (Autodesk.Revit.Exceptions.ApplicationException)
+            {
+                continue;
+            }
+
+            if (curve is not null)
+                yield return curve.GetEndPoint(0);
+        }
     }
 
     private static void AddSolid(Solid solid, Transform transform, TriangleMesh mesh, double lod)

@@ -29,12 +29,14 @@ public sealed class IfcAppearanceApplier
         ElementId? solidFillId = FindSolidFill(document);
         var systemMaterials = new Dictionary<ElementId, ElementId>();
         var systems = new MepSystemTypeColor();
+        var lockedFittings = new HashSet<ElementId>();
+        var coveredByParent = new HashSet<ElementId>();
 
         bool changed = false;
         foreach (Element element in visibility.GetVisibleElements(document, view3D))
         {
             ResolvedAppearance appearance = colors.Resolve(element, view3D);
-            IndexElementAndNested(colorsByIfcGuid, element, appearance);
+            IndexTree(colorsByIfcGuid, colors, view3D, element, null, lockedFittings, coveredByParent);
 
             ElementId materialId = GetOrCreateMaterial(document, materials, materialsByName, appearance);
             changed |= TrySetMaterialParameter(element, materialId);
@@ -61,8 +63,10 @@ public sealed class IfcAppearanceApplier
         var visibility = new VisibilityService();
         var colors = new ColorResolver();
         colors.Bind(view3D);
+        var lockedFittings = new HashSet<ElementId>();
+        var coveredByParent = new HashSet<ElementId>();
         foreach (Element element in visibility.GetVisibleElements(document, view3D))
-            IndexElementAndNested(colorsByIfcGuid, element, colors.Resolve(element, view3D));
+            IndexTree(colorsByIfcGuid, colors, view3D, element, null, lockedFittings, coveredByParent);
     }
 
     private static Dictionary<string, ElementId> IndexMaterials(Document document)
@@ -203,12 +207,41 @@ public sealed class IfcAppearanceApplier
         }
     }
 
-    private static void IndexElementAndNested(
+    private static void IndexTree(
         Dictionary<string, ResolvedAppearance> colorsByIfcGuid,
+        ColorResolver colors,
+        View3D view,
         Element element,
-        ResolvedAppearance appearance)
+        ResolvedAppearance? inherited,
+        HashSet<ElementId> lockedFittings,
+        HashSet<ElementId> coveredByParent)
     {
-        IndexGuids(colorsByIfcGuid, element, appearance);
+        bool fitting = ColorResolver.IsFittingOrAccessory(element);
+        ResolvedAppearance appearance;
+        if (fitting)
+        {
+            if (!lockedFittings.Add(element.Id))
+                return;
+
+            appearance = colors.Resolve(element, view);
+            IndexGuids(colorsByIfcGuid, element, appearance);
+        }
+        else if (inherited is not null)
+        {
+            coveredByParent.Add(element.Id);
+            appearance = inherited.Value;
+            IndexGuids(colorsByIfcGuid, element, appearance);
+        }
+        else if (coveredByParent.Contains(element.Id))
+        {
+            return;
+        }
+        else
+        {
+            appearance = colors.Resolve(element, view);
+            IndexGuids(colorsByIfcGuid, element, appearance);
+        }
+
         if (element is not FamilyInstance instance)
             return;
 
@@ -220,7 +253,16 @@ public sealed class IfcAppearanceApplier
                     continue;
 
                 if (element.Document.GetElement(nestedId) is Element nested)
-                    IndexElementAndNested(colorsByIfcGuid, nested, appearance);
+                {
+                    IndexTree(
+                        colorsByIfcGuid,
+                        colors,
+                        view,
+                        nested,
+                        appearance,
+                        lockedFittings,
+                        coveredByParent);
+                }
             }
         }
         catch (Autodesk.Revit.Exceptions.ApplicationException)
@@ -288,6 +330,11 @@ public sealed class IfcAppearanceApplier
             {
                 case Solid solid:
                     painted |= PaintSolid(document, elementId, solid, materialId);
+                    break;
+                case GeometryInstance instance:
+                    GeometryElement? instanceGeometry = instance.GetInstanceGeometry();
+                    if (instanceGeometry is not null)
+                        painted |= PaintGeometry(document, elementId, instanceGeometry, materialId);
                     break;
                 case GeometryElement nested:
                     painted |= PaintGeometry(document, elementId, nested, materialId);

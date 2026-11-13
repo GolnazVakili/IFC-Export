@@ -19,20 +19,50 @@ public sealed class ColorResolver
         _byElement.Clear();
         _filterPasses.Clear();
         _activeFilters = [];
+        View source = FilterSource(view);
+        IList<ElementId> filterIds;
         try
         {
-            foreach (ElementId filterId in view.GetOrderedFilters())
+            filterIds = source.GetOrderedFilters();
+        }
+        catch (Autodesk.Revit.Exceptions.ApplicationException)
+        {
+            return;
+        }
+
+        foreach (ElementId filterId in filterIds)
+        {
+            try
             {
-                if (!view.GetIsFilterEnabled(filterId) || !view.GetFilterVisibility(filterId))
+                if (!source.GetIsFilterEnabled(filterId) || !source.GetFilterVisibility(filterId))
                     continue;
                 if (view.Document.GetElement(filterId) is not FilterElement filter)
                     continue;
-                _activeFilters.Add((filter, view.GetFilterOverrides(filterId)));
+                _activeFilters.Add((filter, source.GetFilterOverrides(filterId)));
+            }
+            catch (Autodesk.Revit.Exceptions.ApplicationException)
+            {
             }
         }
-        catch (Autodesk.Revit.Exceptions.InvalidOperationException)
+    }
+
+    private static View FilterSource(View view)
+    {
+        if (view.ViewTemplateId == ElementId.InvalidElementId ||
+            view.Document.GetElement(view.ViewTemplateId) is not View template)
         {
-            _activeFilters = [];
+            return view;
+        }
+
+        try
+        {
+            ElementId filtersParameter = new((long)BuiltInParameter.VIS_GRAPHICS_FILTERS);
+            bool templateControlsFilters = !view.GetNonControlledTemplateParameterIds().Contains(filtersParameter);
+            return templateControlsFilters ? template : view;
+        }
+        catch (Autodesk.Revit.Exceptions.ApplicationException)
+        {
+            return view;
         }
     }
 
@@ -51,26 +81,35 @@ public sealed class ColorResolver
 
     private ResolvedAppearance ResolveUncached(Element element, View3D view)
     {
-        Element source = GetAppearanceSource(element);
-        bool piping = IsPipingElement(source);
         int? transparency = null;
 
-        if (TryGetFilterAppearance(source, view, out ResolvedAppearance filterColor, out int? filterTransparency))
+        // View filters are assigned to this element. Fittings and accessories are tested as
+        // themselves; walking up to the host first drops a filter that targets them.
+        if (TryGetFilterAppearance(element, view, out ResolvedAppearance filterColor, out int? filterTransparency) ||
+            (IsFittingOrAccessory(element) &&
+             TryGetConnectedRunFilter(element, view, out filterColor, out filterTransparency)))
         {
             transparency = filterTransparency ?? transparency;
             return WithTransparency(filterColor, transparency);
         }
 
-        if (TryGetOverrideAppearance(source, view, piping, out ResolvedAppearance overrideColor, out int? overrideTransparency))
+        Element source = GetAppearanceSource(element);
+        bool mep = IsMepColorElement(element) || IsMepColorElement(source);
+
+        if (TryGetOverrideAppearance(element, view, mep, out ResolvedAppearance overrideColor, out int? overrideTransparency))
         {
             transparency = overrideTransparency ?? transparency;
             return WithTransparency(overrideColor, transparency);
         }
 
-        if (TryGetSystemTypeAppearance(source, view, piping, out ResolvedAppearance systemColor))
+        if (TryGetSystemTypeAppearance(element, view, mep, out ResolvedAppearance systemColor) ||
+            (!ReferenceEquals(element, source) &&
+             TryGetSystemTypeAppearance(source, view, mep, out systemColor)))
+        {
             return WithTransparency(systemColor, transparency);
+        }
 
-        if (piping)
+        if (mep)
             return WithTransparency(ResolvedAppearance.Default, transparency);
 
         return WithTransparency(GetCategoryDefaultAppearance(source), transparency);
@@ -104,7 +143,7 @@ public sealed class ColorResolver
             if (parent is null || parent.Id == current.Id)
                 break;
 
-            if (!IsPipingElement(parent) && !IsPipingElement(current))
+            if (!IsMepColorElement(current) || !IsMepColorElement(parent))
                 break;
 
             current = parent;
@@ -140,6 +179,52 @@ public sealed class ColorResolver
 
         appearance = lastColor.Value;
         return true;
+    }
+
+    private bool TryGetConnectedRunFilter(
+        Element element,
+        View3D view,
+        out ResolvedAppearance appearance,
+        out int? transparency)
+    {
+        appearance = default;
+        transparency = null;
+        if (element is not FamilyInstance instance)
+            return false;
+
+        var votes = new Dictionary<ElementId, int>();
+        try
+        {
+            ConnectorManager? manager = instance.MEPModel?.ConnectorManager;
+            if (manager is null)
+                return false;
+
+            foreach (Connector connector in manager.Connectors)
+            {
+                foreach (Connector other in connector.AllRefs)
+                {
+                    if (other.Owner is not MEPCurve curve || curve.Id == instance.Id)
+                        continue;
+
+                    votes.TryGetValue(curve.Id, out int count);
+                    votes[curve.Id] = count + 1;
+                }
+            }
+        }
+        catch (Autodesk.Revit.Exceptions.ApplicationException)
+        {
+            return false;
+        }
+
+        foreach (ElementId curveId in votes.OrderByDescending(pair => pair.Value).Select(pair => pair.Key))
+        {
+            if (element.Document.GetElement(curveId) is not Element curve)
+                continue;
+            if (TryGetFilterAppearance(curve, view, out appearance, out transparency))
+                return true;
+        }
+
+        return false;
     }
 
     private static bool TryGetOverrideAppearance(
@@ -281,22 +366,49 @@ public sealed class ColorResolver
 
     private static bool CategoryMatches(ParameterFilterElement filter, Element element)
     {
-        if (element.Category is null)
+        ICollection<ElementId> categories = filter.GetCategories();
+        if (categories.Count == 0)
             return false;
 
-        ICollection<ElementId> categories = filter.GetCategories();
-        if (categories.Contains(element.Category.Id))
+        if (CategoryIdMatches(categories, element.Category))
             return true;
 
         try
         {
-            Category? parent = element.Category.Parent;
-            return parent is not null && categories.Contains(parent.Id);
+            ElementId typeId = element.GetTypeId();
+            if (typeId != ElementId.InvalidElementId &&
+                element.Document.GetElement(typeId) is Element type &&
+                CategoryIdMatches(categories, type.Category))
+            {
+                return true;
+            }
         }
         catch (Autodesk.Revit.Exceptions.ApplicationException)
         {
             return false;
         }
+
+        return false;
+    }
+
+    private static bool CategoryIdMatches(ICollection<ElementId> categories, Category? category)
+    {
+        for (int i = 0; category is not null && i < 6; i++)
+        {
+            if (categories.Contains(category.Id))
+                return true;
+
+            try
+            {
+                category = category.Parent;
+            }
+            catch (Autodesk.Revit.Exceptions.ApplicationException)
+            {
+                return false;
+            }
+        }
+
+        return false;
     }
 
     private bool ElementPassesRules(ParameterFilterElement filter, Element element)
@@ -307,16 +419,33 @@ public sealed class ColorResolver
             _filterPasses[filter.Id] = passing;
         }
 
-        if (passing is not null)
-            return passing.Contains(element.Id);
+        if (passing is not null && passing.Contains(element.Id))
+            return true;
 
+        // Fittings are often missing from the view collector even when the view filter colors them.
+        if (passing is not null && !IsFittingOrAccessory(element))
+            return false;
+
+        return PassesRulesDirectly(filter, element);
+    }
+
+    private static bool PassesRulesDirectly(ParameterFilterElement filter, Element element)
+    {
         try
         {
             ElementFilter? rules = filter.GetElementFilter();
             if (rules is null)
                 return true;
 
-            return rules.PassesFilter(element.Document, element.Id) || rules.PassesFilter(element);
+            Document document = element.Document;
+            if (rules.PassesFilter(document, element.Id) || rules.PassesFilter(element))
+                return true;
+
+            ElementId typeId = element.GetTypeId();
+            if (typeId == ElementId.InvalidElementId || element.Document.GetElement(typeId) is not Element type)
+                return false;
+
+            return rules.PassesFilter(document, typeId) || rules.PassesFilter(type);
         }
         catch (Autodesk.Revit.Exceptions.ApplicationException)
         {
@@ -382,11 +511,105 @@ public sealed class ColorResolver
         };
     }
 
+    internal static bool IsFittingOrAccessory(Element element)
+    {
+        if (CategoryChainIsFittingOrAccessory(element.Category))
+            return true;
+
+        try
+        {
+            ElementId typeId = element.GetTypeId();
+            if (typeId != ElementId.InvalidElementId &&
+                element.Document.GetElement(typeId) is Element type &&
+                CategoryChainIsFittingOrAccessory(type.Category))
+            {
+                return true;
+            }
+        }
+        catch (Autodesk.Revit.Exceptions.ApplicationException)
+        {
+        }
+
+        return false;
+    }
+
+    private static bool CategoryChainIsFittingOrAccessory(Category? category)
+    {
+        for (int i = 0; category is not null && i < 6; i++)
+        {
+            if (IsFittingOrAccessoryCategory(category))
+                return true;
+
+            try
+            {
+                category = category.Parent;
+            }
+            catch (Autodesk.Revit.Exceptions.ApplicationException)
+            {
+                return false;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool IsFittingOrAccessoryCategory(Category category)
+    {
+        BuiltInCategory builtIn = BuiltInCategory.INVALID;
+        try
+        {
+            builtIn = category.BuiltInCategory;
+        }
+        catch (Autodesk.Revit.Exceptions.ApplicationException)
+        {
+        }
+
+        if (builtIn == BuiltInCategory.INVALID)
+        {
+            try
+            {
+                builtIn = (BuiltInCategory)category.Id.Value;
+            }
+            catch (InvalidCastException)
+            {
+            }
+        }
+
+        if (builtIn is
+            BuiltInCategory.OST_PipeFitting or
+            BuiltInCategory.OST_DuctFitting or
+            BuiltInCategory.OST_ConduitFitting or
+            BuiltInCategory.OST_CableTrayFitting or
+            BuiltInCategory.OST_PipeAccessory or
+            BuiltInCategory.OST_DuctAccessory)
+        {
+            return true;
+        }
+
+        string name = category.Name ?? string.Empty;
+        return name.Contains("Fitting", StringComparison.OrdinalIgnoreCase) ||
+               name.Contains("Accessor", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsMepColorElement(Element element) =>
+        IsPipingElement(element) || IsFittingOrAccessory(element);
+
     private static bool IsPipingElement(Element element)
     {
         if (element is Pipe or FlexPipe or PipeInsulation)
             return true;
 
+        return GetBuiltInCategory(element) is
+            BuiltInCategory.OST_PipeCurves or
+            BuiltInCategory.OST_FlexPipeCurves or
+            BuiltInCategory.OST_PipeInsulations or
+            BuiltInCategory.OST_PipeFitting or
+            BuiltInCategory.OST_PipeAccessory or
+            BuiltInCategory.OST_PlaceHolderPipes;
+    }
+
+    private static BuiltInCategory GetBuiltInCategory(Element element)
+    {
         BuiltInCategory category = BuiltInCategory.INVALID;
         try
         {
@@ -398,25 +621,17 @@ public sealed class ColorResolver
             category = BuiltInCategory.INVALID;
         }
 
-        if (category == BuiltInCategory.INVALID && element.Category is not null)
-        {
-            try
-            {
-                category = (BuiltInCategory)element.Category.Id.Value;
-            }
-            catch (InvalidCastException)
-            {
-                return false;
-            }
-        }
+        if (category != BuiltInCategory.INVALID || element.Category is null)
+            return category;
 
-        return category is
-            BuiltInCategory.OST_PipeCurves or
-            BuiltInCategory.OST_FlexPipeCurves or
-            BuiltInCategory.OST_PipeInsulations or
-            BuiltInCategory.OST_PipeFitting or
-            BuiltInCategory.OST_PipeAccessory or
-            BuiltInCategory.OST_PlaceHolderPipes;
+        try
+        {
+            return (BuiltInCategory)element.Category.Id.Value;
+        }
+        catch (InvalidCastException)
+        {
+            return BuiltInCategory.INVALID;
+        }
     }
 
     private static Parameter? FindParameter(Element element, ElementId definitionId)
@@ -446,28 +661,24 @@ public sealed class ColorResolver
     private static bool TryGetSurfaceColor(OverrideGraphicSettings settings, out ResolvedAppearance appearance)
     {
         if (HasPatternOverride(settings.SurfaceForegroundPatternId) &&
-            settings.IsSurfaceForegroundPatternVisible &&
             TryFromRevitColor(settings.SurfaceForegroundPatternColor, settings.Transparency, out appearance))
         {
             return true;
         }
 
         if (HasPatternOverride(settings.SurfaceBackgroundPatternId) &&
-            settings.IsSurfaceBackgroundPatternVisible &&
             TryFromRevitColor(settings.SurfaceBackgroundPatternColor, settings.Transparency, out appearance))
         {
             return true;
         }
 
         if (HasPatternOverride(settings.CutForegroundPatternId) &&
-            settings.IsCutForegroundPatternVisible &&
             TryFromRevitColor(settings.CutForegroundPatternColor, settings.Transparency, out appearance))
         {
             return true;
         }
 
         if (HasPatternOverride(settings.CutBackgroundPatternId) &&
-            settings.IsCutBackgroundPatternVisible &&
             TryFromRevitColor(settings.CutBackgroundPatternColor, settings.Transparency, out appearance))
         {
             return true;

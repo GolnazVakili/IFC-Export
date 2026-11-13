@@ -154,7 +154,7 @@ public sealed class IfcExporter
         {
             colorsByIfcGuid = IfcAppearanceApplier.Apply(document, view);
             appliedAppearance = colorsByIfcGuid.Count > 0;
-            bool? lightSourcesHidden = HideLightSources(view);
+            List<(ElementId Id, bool WasHidden)> lightSourcesHidden = HideLightSources(view);
             try
             {
                 exported = document.Export(folder, name, options);
@@ -232,6 +232,7 @@ public sealed class IfcExporter
         try
         {
             IfcColorPatcher.Apply(path, colorsByIfcGuid);
+            IfcDeviceConeStripper.Apply(path);
         }
         catch (Exception ex)
         {
@@ -241,36 +242,59 @@ public sealed class IfcExporter
         return IfcExportOutcome.Succeeded(setupName, path);
     }
 
-    private static bool? HideLightSources(View view)
+    private static List<(ElementId Id, bool WasHidden)> HideLightSources(View view)
     {
-        ElementId categoryId = new((long)BuiltInCategory.OST_LightingFixtureSource);
-        try
+        var hidden = new List<(ElementId Id, bool WasHidden)>();
+        foreach (Category category in view.Document.Settings.Categories)
         {
-            if (!view.CanCategoryBeHidden(categoryId))
-                return null;
+            HideLightSourceCategory(view, category, hidden);
+            try
+            {
+                foreach (Category sub in category.SubCategories)
+                    HideLightSourceCategory(view, sub, hidden);
+            }
+            catch (Autodesk.Revit.Exceptions.ApplicationException)
+            {
+            }
+        }
 
-            bool hidden = view.GetCategoryHidden(categoryId);
-            if (!hidden)
-                view.SetCategoryHidden(categoryId, true);
-            return hidden;
-        }
-        catch (Autodesk.Revit.Exceptions.ApplicationException)
-        {
-            return null;
-        }
+        return hidden;
     }
 
-    private static void RestoreLightSources(View view, bool? wasHidden)
+    private static void HideLightSourceCategory(
+        View view,
+        Category category,
+        List<(ElementId Id, bool WasHidden)> hidden)
     {
-        if (wasHidden is null)
+        if (!GeometryBuilder.IsLightSourceCategory(category))
             return;
 
         try
         {
-            view.SetCategoryHidden(new ElementId((long)BuiltInCategory.OST_LightingFixtureSource), wasHidden.Value);
+            if (!view.CanCategoryBeHidden(category.Id))
+                return;
+
+            bool wasHidden = view.GetCategoryHidden(category.Id);
+            if (!wasHidden)
+                view.SetCategoryHidden(category.Id, true);
+            hidden.Add((category.Id, wasHidden));
         }
         catch (Autodesk.Revit.Exceptions.ApplicationException)
         {
+        }
+    }
+
+    private static void RestoreLightSources(View view, List<(ElementId Id, bool WasHidden)> hidden)
+    {
+        foreach ((ElementId id, bool wasHidden) in hidden)
+        {
+            try
+            {
+                view.SetCategoryHidden(id, wasHidden);
+            }
+            catch (Autodesk.Revit.Exceptions.ApplicationException)
+            {
+            }
         }
     }
 

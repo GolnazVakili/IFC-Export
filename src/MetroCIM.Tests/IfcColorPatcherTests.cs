@@ -211,3 +211,43 @@ public sealed class IfcColorPatcherTests
         Assert.Contains(",(#10,#20),#", patched);
     }
 }
+
+public sealed class IfcDeviceConeStripperTests
+{
+    [Fact]
+    public void StripDropsThePyramidOnAnOutletAndKeepsTheBody()
+    {
+        const string ifc =
+            "ISO-10303-21;\nHEADER;\nFILE_SCHEMA(('IFC4'));\nENDSEC;\nDATA;\n" +
+            "#10=IFCOUTLET('0k2Hq$n6f8VhP8nZQlY$xK',#2,'Receptacle',$,$,#11,#12,'1');\n" +
+            "#12=IFCPRODUCTDEFINITIONSHAPE($,$,(#13));\n" +
+            "#13=IFCSHAPEREPRESENTATION(#1,'Body','Tessellation',(#50));\n" +
+            "#50=IFCTRIANGULATEDFACESET(#51,$,.T.,((1,2,3),(1,2,4),(1,3,4),(2,3,4),(5,6,7)),$);\n" +
+            "#51=IFCCARTESIANPOINTLIST3D(((0.,0.,0.),(1.,0.,0.),(0.5,1.,0.),(0.5,0.4,1.),(2.,0.,0.),(3.,0.,0.),(2.5,1.,0.)));\n" +
+            "ENDSEC;\nEND-ISO-10303-21;\n";
+
+        string stripped = IfcDeviceConeStripper.Strip(ifc);
+
+        Assert.Contains("((5,6,7))", stripped);
+        Assert.DoesNotContain("(1,2,3)", stripped);
+        Assert.DoesNotContain("(2,3,4)", stripped);
+    }
+
+    [Fact]
+    public void StripLeavesAPyramidOnAPipeFitting()
+    {
+        const string ifc =
+            "ISO-10303-21;\nHEADER;\nFILE_SCHEMA(('IFC4'));\nENDSEC;\nDATA;\n" +
+            "#10=IFCFLOWFITTING('0k2Hq$n6f8VhP8nZQlY$xK',#2,'Elbow',$,$,#11,#12,'1');\n" +
+            "#12=IFCPRODUCTDEFINITIONSHAPE($,$,(#13));\n" +
+            "#13=IFCSHAPEREPRESENTATION(#1,'Body','Tessellation',(#50));\n" +
+            "#50=IFCTRIANGULATEDFACESET(#51,$,.T.,((1,2,3),(1,2,4),(1,3,4),(2,3,4),(5,6,7)),$);\n" +
+            "#51=IFCCARTESIANPOINTLIST3D(((0.,0.,0.),(1.,0.,0.),(0.5,1.,0.),(0.5,0.4,1.),(2.,0.,0.),(3.,0.,0.),(2.5,1.,0.)));\n" +
+            "ENDSEC;\nEND-ISO-10303-21;\n";
+
+        string stripped = IfcDeviceConeStripper.Strip(ifc);
+
+        Assert.Contains("(1,2,3)", stripped);
+        Assert.Contains("(5,6,7)", stripped);
+    }
+}
