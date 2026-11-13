@@ -437,26 +437,11 @@ $body.Font = $form.Font
 $body.ForeColor = [System.Drawing.Color]::FromArgb(32, 32, 32)
 $body.AutoSize = $true
 $body.MaximumSize = New-Object System.Drawing.Size(460, 0)
+if ($payloadError) {
+    $body.Text = $payloadError
+}
 $body.Location = New-Object System.Drawing.Point(20, ($heading.Bottom + 12))
 $form.Controls.Add($body)
-
-$pathLabel = New-Object System.Windows.Forms.Label
-$pathLabel.Text = "Folder: $target"
-$pathLabel.Font = $form.Font
-$pathLabel.ForeColor = [System.Drawing.Color]::FromArgb(32, 32, 32)
-$pathLabel.AutoSize = $true
-$pathLabel.MaximumSize = New-Object System.Drawing.Size(460, 0)
-$pathLabel.Location = New-Object System.Drawing.Point(20, ($body.Bottom + 14))
-$form.Controls.Add($pathLabel)
-
-$status = New-Object System.Windows.Forms.Label
-$status.Text = if ($payloadError) { $payloadError } else { 'Ready to install.' }
-$status.Font = New-Object System.Drawing.Font('Segoe UI', 10, [System.Drawing.FontStyle]::Bold)
-$status.ForeColor = [System.Drawing.Color]::Black
-$status.AutoSize = $true
-$status.MaximumSize = New-Object System.Drawing.Size(460, 0)
-$status.Location = New-Object System.Drawing.Point(20, ($pathLabel.Bottom + 10))
-$form.Controls.Add($status)
 
 $buttonBar = New-Object System.Windows.Forms.Panel
 $buttonBar.Dock = [System.Windows.Forms.DockStyle]::Bottom
@@ -494,19 +479,17 @@ $form.AcceptButton = $installButton
 $form.CancelButton = $closeButton
 $form.Controls.Add($buttonBar)
 $form.Controls.SetChildIndex($buttonBar, 0)
-$form.ClientSize = New-Object System.Drawing.Size(500, ($status.Bottom + 18 + $buttonBar.Height))
+$form.ClientSize = New-Object System.Drawing.Size(500, ($body.Bottom + 18 + $buttonBar.Height))
 
 $installButton.Add_Click({
         $installButton.Enabled = $false
         $uninstallButton.Enabled = $false
         try {
             Install-MetroCim -SourceDir $payloadRoot -AddinsDir $target -ManageArp:$manageArp
-            $status.Text = "Installed. Restart Revit, then use the Automation tab."
             Show-Info "Export is installed for Revit $RevitVersion.`r`n`r`nRestart Revit, then use the Automation tab.`r`n`r`nExport XKT: Node.js`r`nnpm: xeokit-convert"
             $form.Close()
         }
         catch {
-            $status.Text = $_.Exception.Message
             Show-Warning $_.Exception.Message
         }
         finally {
@@ -525,12 +508,10 @@ $uninstallButton.Add_Click({
         $uninstallButton.Enabled = $false
         try {
             Uninstall-MetroCim -AddinsDir $target -ManageArp:$manageArp | Out-Null
-            $status.Text = 'Export was removed. Restart Revit if it is open.'
             Show-Info "Export was removed.`r`n`r`nRestart Revit if it was already open."
             $form.Close()
         }
         catch {
-            $status.Text = $_.Exception.Message
             Show-Warning $_.Exception.Message
         }
         finally {
