@@ -102,17 +102,21 @@ public sealed class ColorResolver
             return WithTransparency(overrideColor, transparency);
         }
 
-        if (TryGetSystemTypeAppearance(element, view, mep, out ResolvedAppearance systemColor) ||
+        if (_systems.TryGet(element, out ResolvedAppearance systemColor) ||
             (!ReferenceEquals(element, source) &&
-             TryGetSystemTypeAppearance(source, view, mep, out systemColor)))
+             _systems.TryGet(source, out systemColor)))
         {
             return WithTransparency(systemColor, transparency);
         }
 
-        if (mep)
-            return WithTransparency(ResolvedAppearance.Default, transparency);
+        if (TryGetMaterialAppearance(element, view, out ResolvedAppearance materialColor) ||
+            (!ReferenceEquals(element, source) &&
+             TryGetMaterialAppearance(source, view, out materialColor)))
+        {
+            return WithTransparency(materialColor, transparency);
+        }
 
-        return WithTransparency(GetCategoryDefaultAppearance(source), transparency);
+        return WithTransparency(ResolvedAppearance.Default, transparency);
     }
 
     private static Element GetAppearanceSource(Element element)
@@ -275,68 +279,373 @@ public sealed class ColorResolver
         return false;
     }
 
-    private bool TryGetSystemTypeAppearance(
-        Element element,
-        View3D view,
-        bool piping,
-        out ResolvedAppearance appearance)
+    private static bool TryGetMaterialAppearance(Element element, View3D view, out ResolvedAppearance appearance)
     {
-        appearance = default;
+        if (TryAssignedMaterialColor(element, instance: true, out appearance))
+            return true;
 
-        if (element.Category is not null)
+        if (TryAssignedMaterialColor(element, instance: false, out appearance))
+            return true;
+
+        if (TryShownMaterialColor(element, view, out appearance))
+            return true;
+
+        if (element.Category?.Material is Material categoryMaterial &&
+            TryFromRevitColor(categoryMaterial.Color, categoryMaterial.Transparency, out appearance))
         {
-            try
-            {
-                ElementId schemeId = view.GetColorFillSchemeId(element.Category.Id);
-                if (schemeId != ElementId.InvalidElementId &&
-                    view.Document.GetElement(schemeId) is ColorFillScheme scheme &&
-                    !(piping && MepSystemTypeColor.IsPhysicalMaterialParameter(scheme.ParameterDefinition)) &&
-                    TryMatchColorFill(element, scheme, out appearance))
-                {
-                    return true;
-                }
-            }
-            catch (Autodesk.Revit.Exceptions.ApplicationException)
-            {
-                // Category does not support color fill in this view.
-            }
+            return true;
         }
 
-        return _systems.TryGet(element, out appearance);
+        appearance = default;
+        return false;
     }
 
-    private static ResolvedAppearance GetCategoryDefaultAppearance(Element element)
+    private static bool TryAssignedMaterialColor(Element element, bool instance, out ResolvedAppearance appearance)
     {
-        Document doc = element.Document;
+        appearance = default;
+        foreach (ElementId materialId in instance ? CollectInstanceMaterialIds(element) : CollectTypeMaterialIds(element))
+        {
+            if (TryMaterialColor(element.Document, materialId, out appearance))
+                return true;
+        }
 
-        ICollection<ElementId> materialIds = [];
+        return false;
+    }
+
+    private static List<ElementId> CollectInstanceMaterialIds(Element element)
+    {
+        var ids = new List<ElementId>();
+        var seen = new HashSet<ElementId>();
+
+        void Add(ElementId id)
+        {
+            if (id != ElementId.InvalidElementId && seen.Add(id))
+                ids.Add(id);
+        }
+
+        AddInstanceParameterMaterial(element, BuiltInParameter.MATERIAL_ID_PARAM, Add);
+        AddMaterialParameters(element, instanceOnly: true, Add);
+
         try
         {
-            materialIds = element.GetMaterialIds(false);
+            foreach (ElementId id in element.GetMaterialIds(true))
+                Add(id);
         }
         catch (Autodesk.Revit.Exceptions.ApplicationException)
         {
-            // Element does not support material quantities.
         }
 
-        foreach (ElementId materialId in materialIds)
+        return ids;
+    }
+
+    private static List<ElementId> CollectTypeMaterialIds(Element element)
+    {
+        var ids = new List<ElementId>();
+        var seen = new HashSet<ElementId>();
+
+        void Add(ElementId id)
         {
-            if (doc.GetElement(materialId) is Material material &&
-                TryFromRevitColor(material.Color, material.Transparency, out ResolvedAppearance fromMaterial) &&
-                !fromMaterial.IsNearBlack)
+            if (id != ElementId.InvalidElementId && seen.Add(id))
+                ids.Add(id);
+        }
+
+        if (TryGetTypeElement(element, out Element? type) && type is not null)
+        {
+            AddParameterMaterial(type, BuiltInParameter.MATERIAL_ID_PARAM, Add);
+            AddMaterialParameters(type, instanceOnly: false, Add);
+        }
+
+        if (element is Pipe pipe)
+        {
+            try
             {
-                return fromMaterial;
+                Add(pipe.PipeSegment?.MaterialId ?? ElementId.InvalidElementId);
+            }
+            catch (Autodesk.Revit.Exceptions.ApplicationException)
+            {
             }
         }
 
-        if (element.Category?.Material is { } categoryMaterial &&
-            TryFromRevitColor(categoryMaterial.Color, categoryMaterial.Transparency, out ResolvedAppearance fromCategoryMaterial) &&
-            !fromCategoryMaterial.IsNearBlack)
+        return ids;
+    }
+
+    private static void AddInstanceParameterMaterial(Element element, BuiltInParameter builtIn, Action<ElementId> add)
+    {
+        try
         {
-            return fromCategoryMaterial;
+            Parameter? parameter = element.get_Parameter(builtIn);
+            if (parameter is null || IsTypeParameter(element, parameter))
+                return;
+
+            AddParameterMaterial(element, builtIn, add);
+        }
+        catch (Autodesk.Revit.Exceptions.ApplicationException)
+        {
+        }
+    }
+
+    private static void AddMaterialParameters(Element element, bool instanceOnly, Action<ElementId> add)
+    {
+        try
+        {
+            foreach (Parameter parameter in element.Parameters)
+            {
+                if (parameter.StorageType != StorageType.ElementId || !parameter.HasValue)
+                    continue;
+
+                if (instanceOnly && IsTypeParameter(element, parameter))
+                    continue;
+
+                ElementId id = parameter.AsElementId();
+                if (element.Document.GetElement(id) is Material)
+                    add(id);
+            }
+        }
+        catch (Autodesk.Revit.Exceptions.ApplicationException)
+        {
+        }
+    }
+
+    private static bool IsTypeParameter(Element element, Parameter parameter)
+    {
+        if (!TryGetTypeElement(element, out Element? type) || type is null)
+            return false;
+
+        try
+        {
+            if (parameter.Definition is InternalDefinition internalDef &&
+                internalDef.BuiltInParameter != BuiltInParameter.INVALID)
+            {
+                return type.get_Parameter(internalDef.BuiltInParameter) is not null;
+            }
+
+            return type.LookupParameter(parameter.Definition.Name) is not null;
+        }
+        catch (Autodesk.Revit.Exceptions.ApplicationException)
+        {
+            return false;
+        }
+    }
+
+    private static bool TryGetTypeElement(Element element, out Element? type)
+    {
+        type = null;
+        try
+        {
+            ElementId typeId = element.GetTypeId();
+            if (typeId == ElementId.InvalidElementId)
+                return false;
+
+            type = element.Document.GetElement(typeId);
+            return type is not null;
+        }
+        catch (Autodesk.Revit.Exceptions.ApplicationException)
+        {
+            return false;
+        }
+    }
+
+    private static bool TryShownMaterialColor(Element element, View3D view, out ResolvedAppearance appearance)
+    {
+        appearance = default;
+        var areaByMaterial = new Dictionary<ElementId, double>();
+        AccumulateShownMaterials(element, view, areaByMaterial, [], 0);
+
+        foreach ((ElementId materialId, double _) in areaByMaterial.OrderByDescending(pair => pair.Value))
+        {
+            if (TryMaterialColor(element.Document, materialId, out appearance))
+                return true;
         }
 
-        return ResolvedAppearance.Default;
+        return false;
+    }
+
+    private static void AccumulateShownMaterials(
+        Element element,
+        View3D view,
+        Dictionary<ElementId, double> areaByMaterial,
+        HashSet<ElementId> visited,
+        int depth)
+    {
+        if (depth >= 8 || !visited.Add(element.Id))
+            return;
+
+        GeometryElement? geometry = GetElementGeometry(element, view) ?? GetElementGeometry(element, null);
+        if (geometry is not null)
+            AccumulateShownMaterials(geometry, areaByMaterial, depth);
+
+        if (element is not FamilyInstance instance)
+            return;
+
+        ICollection<ElementId> nestedIds;
+        try
+        {
+            nestedIds = instance.GetSubComponentIds();
+        }
+        catch (Autodesk.Revit.Exceptions.ApplicationException)
+        {
+            return;
+        }
+
+        foreach (ElementId nestedId in nestedIds)
+        {
+            if (element.Document.GetElement(nestedId) is Element nested)
+                AccumulateShownMaterials(nested, view, areaByMaterial, visited, depth + 1);
+        }
+    }
+
+    private static bool AccumulateShownMaterials(
+        GeometryElement geometry,
+        Dictionary<ElementId, double> areaByMaterial,
+        int depth)
+    {
+        if (depth >= 8)
+            return false;
+
+        bool found = false;
+        foreach (GeometryObject obj in geometry)
+        {
+            switch (obj)
+            {
+                case Solid solid when !solid.Faces.IsEmpty:
+                    foreach (Face face in solid.Faces)
+                        found |= AddFaceMaterial(face, areaByMaterial);
+                    break;
+                case Mesh mesh:
+                    found |= AddMeshMaterial(mesh, areaByMaterial);
+                    break;
+                case GeometryInstance instance:
+                    found |= AccumulateInstanceMaterials(instance, areaByMaterial, depth + 1);
+                    break;
+                case GeometryElement nested:
+                    found |= AccumulateShownMaterials(nested, areaByMaterial, depth + 1);
+                    break;
+            }
+        }
+
+        return found;
+    }
+
+    private static bool AccumulateInstanceMaterials(
+        GeometryInstance instance,
+        Dictionary<ElementId, double> areaByMaterial,
+        int depth)
+    {
+        try
+        {
+            GeometryElement? shown = instance.GetInstanceGeometry();
+            if (shown is not null && AccumulateShownMaterials(shown, areaByMaterial, depth))
+                return true;
+        }
+        catch (Autodesk.Revit.Exceptions.ApplicationException)
+        {
+        }
+
+        try
+        {
+            GeometryElement? familyGeometry = instance.GetSymbolGeometry();
+            if (familyGeometry is not null)
+                return AccumulateShownMaterials(familyGeometry, areaByMaterial, depth);
+        }
+        catch (Autodesk.Revit.Exceptions.ApplicationException)
+        {
+        }
+
+        return false;
+    }
+
+    private static bool AddFaceMaterial(Face face, Dictionary<ElementId, double> areaByMaterial)
+    {
+        try
+        {
+            if (face.MaterialElementId == ElementId.InvalidElementId)
+                return false;
+
+            double area = face.Area > 0 ? face.Area : 1;
+            AddMaterialArea(areaByMaterial, face.MaterialElementId, area);
+            return true;
+        }
+        catch (Autodesk.Revit.Exceptions.ApplicationException)
+        {
+            return false;
+        }
+    }
+
+    private static bool AddMeshMaterial(Mesh mesh, Dictionary<ElementId, double> areaByMaterial)
+    {
+        try
+        {
+            if (mesh.MaterialElementId == ElementId.InvalidElementId)
+                return false;
+
+            AddMaterialArea(areaByMaterial, mesh.MaterialElementId, MeshArea(mesh));
+            return true;
+        }
+        catch (Autodesk.Revit.Exceptions.ApplicationException)
+        {
+            return false;
+        }
+    }
+
+    private static double MeshArea(Mesh mesh)
+    {
+        double area = 0;
+        for (int i = 0; i < mesh.NumTriangles; i++)
+        {
+            MeshTriangle triangle = mesh.get_Triangle(i);
+            XYZ a = triangle.get_Vertex(0);
+            XYZ b = triangle.get_Vertex(1);
+            XYZ c = triangle.get_Vertex(2);
+            area += (b - a).CrossProduct(c - a).GetLength() * 0.5;
+        }
+
+        return area > 0 ? area : 1;
+    }
+
+    private static void AddMaterialArea(Dictionary<ElementId, double> areaByMaterial, ElementId materialId, double area)
+    {
+        areaByMaterial.TryGetValue(materialId, out double existing);
+        areaByMaterial[materialId] = existing + area;
+    }
+
+    private static GeometryElement? GetElementGeometry(Element element, View3D? view)
+    {
+        try
+        {
+            var options = new Options
+            {
+                ComputeReferences = false,
+                IncludeNonVisibleObjects = false
+            };
+            if (view is not null)
+                options.View = view;
+
+            return element.get_Geometry(options);
+        }
+        catch (Autodesk.Revit.Exceptions.ApplicationException)
+        {
+            return null;
+        }
+    }
+
+    private static void AddParameterMaterial(Element element, BuiltInParameter builtIn, Action<ElementId> add)
+    {
+        try
+        {
+            Parameter? parameter = element.get_Parameter(builtIn);
+            if (parameter is { StorageType: StorageType.ElementId, HasValue: true })
+                add(parameter.AsElementId());
+        }
+        catch (Autodesk.Revit.Exceptions.ApplicationException)
+        {
+        }
+    }
+
+    private static bool TryMaterialColor(Document document, ElementId materialId, out ResolvedAppearance appearance)
+    {
+        appearance = default;
+        return document.GetElement(materialId) is Material material &&
+               TryFromRevitColor(material.Color, material.Transparency, out appearance);
     }
 
     private bool ElementPassesFilter(Element element, FilterElement filter)
@@ -474,43 +783,6 @@ public sealed class ColorResolver
         }
     }
 
-    private static bool TryMatchColorFill(Element element, ColorFillScheme scheme, out ResolvedAppearance appearance)
-    {
-        appearance = default;
-        Parameter? parameter = FindParameter(element, scheme.ParameterDefinition);
-        if (parameter is null || !parameter.HasValue)
-            return false;
-
-        foreach (ColorFillSchemeEntry entry in scheme.GetEntries())
-        {
-            if (!entry.IsVisible)
-                continue;
-
-            if (!EntryMatches(parameter, entry))
-                continue;
-
-            if (TryFromRevitColor(entry.Color, 0, out appearance))
-                return true;
-        }
-
-        return false;
-    }
-
-    private static bool EntryMatches(Parameter parameter, ColorFillSchemeEntry entry)
-    {
-        if (parameter.StorageType != entry.StorageType)
-            return false;
-
-        return entry.StorageType switch
-        {
-            StorageType.Integer => parameter.AsInteger() == entry.GetIntegerValue(),
-            StorageType.Double => Math.Abs(parameter.AsDouble() - entry.GetDoubleValue()) < 1e-6,
-            StorageType.String => string.Equals(parameter.AsString() ?? string.Empty, entry.GetStringValue() ?? string.Empty, StringComparison.Ordinal),
-            StorageType.ElementId => parameter.AsElementId() == entry.GetElementIdValue(),
-            _ => false
-        };
-    }
-
     internal static bool IsFittingOrAccessory(Element element)
     {
         if (CategoryChainIsFittingOrAccessory(element.Category))
@@ -632,30 +904,6 @@ public sealed class ColorResolver
         {
             return BuiltInCategory.INVALID;
         }
-    }
-
-    private static Parameter? FindParameter(Element element, ElementId definitionId)
-    {
-        if (definitionId == ElementId.InvalidElementId)
-            return null;
-
-        foreach (Parameter parameter in element.Parameters)
-        {
-            if (parameter.Id == definitionId)
-                return parameter;
-        }
-
-        ElementId typeId = element.GetTypeId();
-        if (typeId != ElementId.InvalidElementId && element.Document.GetElement(typeId) is Element type)
-        {
-            foreach (Parameter parameter in type.Parameters)
-            {
-                if (parameter.Id == definitionId)
-                    return parameter;
-            }
-        }
-
-        return null;
     }
 
     private static bool TryGetSurfaceColor(OverrideGraphicSettings settings, out ResolvedAppearance appearance)

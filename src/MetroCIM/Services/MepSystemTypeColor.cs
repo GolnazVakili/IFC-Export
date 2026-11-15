@@ -16,29 +16,8 @@ public sealed class MepSystemTypeColor
         BuiltInParameter.RBS_DUCT_SYSTEM_TYPE_PARAM
     ];
 
-    private static readonly BuiltInParameter[] PhysicalMaterialParameters =
-    [
-        BuiltInParameter.RBS_PIPE_MATERIAL_PARAM,
-        BuiltInParameter.MATERIAL_ID_PARAM
-    ];
-
     private readonly Dictionary<ElementId, ResolvedAppearance?> _bySystemType = [];
     private readonly Dictionary<ElementId, ElementId?> _systemTypeByElement = [];
-
-    public static bool IsPhysicalMaterialParameter(ElementId parameterId)
-    {
-        if (parameterId == ElementId.InvalidElementId)
-            return false;
-
-        long value = parameterId.Value;
-        foreach (BuiltInParameter builtIn in PhysicalMaterialParameters)
-        {
-            if (value == (long)builtIn)
-                return true;
-        }
-
-        return false;
-    }
 
     public bool TryGet(Element element, out ResolvedAppearance appearance)
     {

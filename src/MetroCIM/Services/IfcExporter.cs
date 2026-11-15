@@ -155,6 +155,7 @@ public sealed class IfcExporter
             colorsByIfcGuid = IfcAppearanceApplier.Apply(document, view);
             appliedAppearance = colorsByIfcGuid.Count > 0;
             List<(ElementId Id, bool WasHidden)> lightSourcesHidden = HideLightSources(view);
+            ViewDetailSnapshot detail = UseFineDetail(view);
             try
             {
                 exported = document.Export(folder, name, options);
@@ -169,6 +170,7 @@ public sealed class IfcExporter
             }
             finally
             {
+                RestoreDetail(view, detail);
                 RestoreLightSources(view, lightSourcesHidden);
             }
 
@@ -278,6 +280,58 @@ public sealed class IfcExporter
             if (!wasHidden)
                 view.SetCategoryHidden(category.Id, true);
             hidden.Add((category.Id, wasHidden));
+        }
+        catch (Autodesk.Revit.Exceptions.ApplicationException)
+        {
+        }
+    }
+
+    private readonly record struct ViewDetailSnapshot(ViewDetailLevel Level, IList<ElementId>? TemplateParameters, bool Changed);
+
+    private static ViewDetailSnapshot UseFineDetail(View view)
+    {
+        if (view is not View3D || view.DetailLevel == ViewDetailLevel.Fine)
+            return default;
+
+        IList<ElementId>? templateParameters = null;
+        try
+        {
+            if (view.ViewTemplateId != ElementId.InvalidElementId)
+            {
+                templateParameters = view.GetNonControlledTemplateParameterIds().ToList();
+                var detail = new ElementId(BuiltInParameter.VIEW_DETAIL_LEVEL);
+                if (!templateParameters.Any(id => id.Value == detail.Value))
+                {
+                    var next = new List<ElementId>(templateParameters) { detail };
+                    view.SetNonControlledTemplateParameterIds(next);
+                }
+                else
+                {
+                    templateParameters = null;
+                }
+            }
+
+            ViewDetailLevel previous = view.DetailLevel;
+            view.DetailLevel = ViewDetailLevel.Fine;
+            return new ViewDetailSnapshot(previous, templateParameters, true);
+        }
+        catch (Autodesk.Revit.Exceptions.ApplicationException)
+        {
+            return new ViewDetailSnapshot(default, templateParameters, templateParameters is not null);
+        }
+    }
+
+    private static void RestoreDetail(View view, ViewDetailSnapshot snapshot)
+    {
+        if (!snapshot.Changed && snapshot.TemplateParameters is null)
+            return;
+
+        try
+        {
+            if (snapshot.Changed && snapshot.Level != default && view.DetailLevel != snapshot.Level)
+                view.DetailLevel = snapshot.Level;
+            if (snapshot.TemplateParameters is not null)
+                view.SetNonControlledTemplateParameterIds(snapshot.TemplateParameters);
         }
         catch (Autodesk.Revit.Exceptions.ApplicationException)
         {

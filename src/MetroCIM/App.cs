@@ -1,6 +1,7 @@
 using Autodesk.Revit.UI;
 using MetroCIM.Commands;
 using System.Reflection;
+using System.Windows.Media.Imaging;
 
 namespace MetroCIM;
 
@@ -25,36 +26,42 @@ public sealed class App : IExternalApplication
 
         var gltfButton = new PushButtonData(
             "ExportGltf",
-            "Export\nglTF",
+            "glTF",
             assemblyPath,
             typeof(ExportGltfCommand).FullName)
         {
             ToolTip = "Export glTF (View Colors)",
             LongDescription =
-                "Exports the active 3D view to glTF (.glb/.gltf) using on-screen visibility and graphic overrides."
+                "Exports the active 3D view to glTF (.glb/.gltf) using on-screen visibility and graphic overrides.",
+            LargeImage = LoadPng("Resources/gltf_32.png"),
+            Image = LoadPng("Resources/gltf_16.png")
         };
 
         var xktButton = new PushButtonData(
             "ExportXkt",
-            "Export\nXKT",
+            "XKT",
             assemblyPath,
             typeof(ExportXktCommand).FullName)
         {
             ToolTip = "Export XKT (View Colors)",
             LongDescription =
                 "Exports the active 3D view to XKT via an intermediate glTF, using xeokit-convert. " +
-                "Requires Node.js and `npm install -g @xeokit/xeokit-convert`."
+                "Requires Node.js and `npm install -g @xeokit/xeokit-convert`.",
+            LargeImage = LoadPng("Resources/xkt_32.png"),
+            Image = LoadPng("Resources/xkt_16.png")
         };
 
         var ifcButton = new PushButtonData(
             "ExportIfc",
-            "Export\nIFC",
+            "IFC",
             assemblyPath,
             typeof(ExportIfcCommand).FullName)
         {
             ToolTip = "Export IFC (Revit IFC setup)",
             LongDescription =
-                "Exports the model to IFC using a Revit IFC export setup (in-session, built-in, or saved in this project)."
+                "Exports the model to IFC using a Revit IFC export setup (in-session, built-in, or saved in this project).",
+            LargeImage = LoadPng("Resources/ifc_32.png"),
+            Image = LoadPng("Resources/ifc_16.png")
         };
 
         panel.AddItem(gltfButton);
@@ -74,5 +81,16 @@ public sealed class App : IExternalApplication
         }
 
         return application.CreateRibbonPanel(TabName, PanelName);
+    }
+
+    private static BitmapImage LoadPng(string relativePath)
+    {
+        var image = new BitmapImage();
+        image.BeginInit();
+        image.UriSource = new Uri($"pack://application:,,,/MetroCIM;component/{relativePath}");
+        image.CacheOption = BitmapCacheOption.OnLoad;
+        image.EndInit();
+        image.Freeze();
+        return image;
     }
 }

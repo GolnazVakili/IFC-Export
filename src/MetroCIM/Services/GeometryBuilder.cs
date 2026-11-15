@@ -11,31 +11,12 @@ public sealed class GeometryBuilder
     private readonly Dictionary<ElementId, bool> _lightSourceStyles = [];
     private Document? _document;
     private bool _dropDeviceCones;
+    private bool _usePlacedGeometry;
 
     public void ClearCache() => _symbolCache.Clear();
 
     public TriangleMesh? BuildMesh(Element element, View3D view)
     {
-        Options options = new()
-        {
-            ComputeReferences = false,
-            IncludeNonVisibleObjects = false,
-            View = view
-        };
-
-        GeometryElement? geometry;
-        try
-        {
-            geometry = element.get_Geometry(options);
-        }
-        catch (Autodesk.Revit.Exceptions.ApplicationException)
-        {
-            return null;
-        }
-
-        if (geometry is null)
-            return null;
-
         double lod = view.DetailLevel switch
         {
             ViewDetailLevel.Coarse => 0.50,
@@ -43,9 +24,34 @@ public sealed class GeometryBuilder
             _ => 0.80
         };
 
+        bool mepBody = MepModelElements.IsRunOrFitting(element);
+        TriangleMesh? viewMesh = BuildFromGeometry(element, GetViewGeometry(element, view), lod, usePlacedGeometry: false);
+        if (!mepBody)
+            return viewMesh;
+
+        if (viewMesh is { IsEmpty: false, IsPaperThin: false })
+            return viewMesh;
+
+        TriangleMesh? body = BuildFromGeometry(element, GetFineGeometry(element), 0.80, usePlacedGeometry: true);
+        if (body is { IsEmpty: false })
+            return body;
+
+        return viewMesh;
+    }
+
+    private TriangleMesh? BuildFromGeometry(
+        Element element,
+        GeometryElement? geometry,
+        double lod,
+        bool usePlacedGeometry)
+    {
+        if (geometry is null)
+            return null;
+
         var mesh = new TriangleMesh();
         _document = element.Document;
         _dropDeviceCones = IsDeviceCategory(element);
+        _usePlacedGeometry = usePlacedGeometry;
         try
         {
             Collect(geometry, Transform.Identity, mesh, lod);
@@ -54,9 +60,44 @@ public sealed class GeometryBuilder
         {
             _document = null;
             _dropDeviceCones = false;
+            _usePlacedGeometry = false;
         }
 
         return mesh.IsEmpty ? null : mesh;
+    }
+
+    private static GeometryElement? GetViewGeometry(Element element, View3D view)
+    {
+        try
+        {
+            return element.get_Geometry(new Options
+            {
+                ComputeReferences = false,
+                IncludeNonVisibleObjects = false,
+                View = view
+            });
+        }
+        catch (Autodesk.Revit.Exceptions.ApplicationException)
+        {
+            return null;
+        }
+    }
+
+    private static GeometryElement? GetFineGeometry(Element element)
+    {
+        try
+        {
+            return element.get_Geometry(new Options
+            {
+                ComputeReferences = false,
+                IncludeNonVisibleObjects = false,
+                DetailLevel = ViewDetailLevel.Fine
+            });
+        }
+        catch (Autodesk.Revit.Exceptions.ApplicationException)
+        {
+            return null;
+        }
     }
 
     private void Collect(GeometryElement geometry, Transform transform, TriangleMesh mesh, double lod)
@@ -89,6 +130,9 @@ public sealed class GeometryBuilder
         if (IsLightSource(instance))
             return;
 
+        if (_usePlacedGeometry && TryAddPlacedGeometry(instance, mesh, lod))
+            return;
+
         Transform world = transform.Multiply(instance.Transform);
         string? key = TrySymbolCacheKey(instance);
 
@@ -116,6 +160,26 @@ public sealed class GeometryBuilder
         GeometryElement? instanceGeometry = instance.GetInstanceGeometry();
         if (instanceGeometry is not null)
             Collect(instanceGeometry, transform, mesh, lod);
+    }
+
+    private bool TryAddPlacedGeometry(GeometryInstance instance, TriangleMesh mesh, double lod)
+    {
+        GeometryElement? placed;
+        try
+        {
+            placed = instance.GetInstanceGeometry();
+        }
+        catch (Autodesk.Revit.Exceptions.ApplicationException)
+        {
+            return false;
+        }
+
+        if (placed is null)
+            return false;
+
+        int before = mesh.Indices.Count;
+        Collect(placed, Transform.Identity, mesh, lod);
+        return mesh.Indices.Count > before;
     }
 
     private string? TrySymbolCacheKey(GeometryInstance instance)

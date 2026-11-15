@@ -29,7 +29,55 @@ public sealed class VisibilityService
             results.Add(element);
         }
 
+        AddMepRunsAndFittings(doc, view, tempHideIsolate, hiddenCategories, hiddenWorksets, results);
         return results;
+    }
+
+    private static void AddMepRunsAndFittings(
+        Document doc,
+        View3D view,
+        bool tempHideIsolate,
+        Dictionary<ElementId, bool> hiddenCategories,
+        Dictionary<WorksetId, bool> hiddenWorksets,
+        List<Element> results)
+    {
+        var seen = new HashSet<ElementId>(results.Select(element => element.Id));
+        foreach (BuiltInCategory category in MepModelElements.Categories)
+        {
+            IList<Element> extra;
+            try
+            {
+                extra = new FilteredElementCollector(doc)
+                    .OfCategory(category)
+                    .WhereElementIsNotElementType()
+                    .ToElements();
+            }
+            catch (Autodesk.Revit.Exceptions.ApplicationException)
+            {
+                continue;
+            }
+
+            foreach (Element element in extra)
+            {
+                if (!seen.Add(element.Id))
+                    continue;
+
+                if (!IsExportable(element, view, tempHideIsolate, hiddenCategories, hiddenWorksets))
+                    continue;
+
+                try
+                {
+                    if (element.get_BoundingBox(view) is null)
+                        continue;
+                }
+                catch (Autodesk.Revit.Exceptions.ApplicationException)
+                {
+                    continue;
+                }
+
+                results.Add(element);
+            }
+        }
     }
 
     private static bool IsExportable(
