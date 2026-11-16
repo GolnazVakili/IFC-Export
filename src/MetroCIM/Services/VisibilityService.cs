@@ -65,17 +65,98 @@ public sealed class VisibilityService
                 if (!IsExportable(element, view, tempHideIsolate, hiddenCategories, hiddenWorksets))
                     continue;
 
-                try
+                if (!IsInsideView(view, element))
+                    continue;
+
+                results.Add(element);
+            }
+        }
+    }
+
+    private static bool IsInsideView(View3D view, Element element)
+    {
+        try
+        {
+            if (element.get_BoundingBox(view) is not null)
+                return true;
+        }
+        catch (Autodesk.Revit.Exceptions.ApplicationException)
+        {
+        }
+
+        if (!MepModelElements.IsFitting(element))
+            return false;
+
+        BoundingBoxXYZ? model;
+        try
+        {
+            model = element.get_BoundingBox(null);
+        }
+        catch (Autodesk.Revit.Exceptions.ApplicationException)
+        {
+            return false;
+        }
+
+        if (model is null)
+            return false;
+
+        if (!view.CropBoxActive)
+            return true;
+
+        try
+        {
+            BoundingBoxXYZ crop = view.CropBox;
+            Transform toView = crop.Transform.Inverse;
+            bool any = false;
+            double minX = 0, minY = 0, minZ = 0, maxX = 0, maxY = 0, maxZ = 0;
+            foreach (XYZ corner in Corners(model))
+            {
+                XYZ point = toView.OfPoint(corner);
+                if (!any)
                 {
-                    if (element.get_BoundingBox(view) is null)
-                        continue;
-                }
-                catch (Autodesk.Revit.Exceptions.ApplicationException)
-                {
+                    minX = maxX = point.X;
+                    minY = maxY = point.Y;
+                    minZ = maxZ = point.Z;
+                    any = true;
                     continue;
                 }
 
-                results.Add(element);
+                minX = Math.Min(minX, point.X);
+                maxX = Math.Max(maxX, point.X);
+                minY = Math.Min(minY, point.Y);
+                maxY = Math.Max(maxY, point.Y);
+                minZ = Math.Min(minZ, point.Z);
+                maxZ = Math.Max(maxZ, point.Z);
+            }
+
+            return any &&
+                   minX <= crop.Max.X && maxX >= crop.Min.X &&
+                   minY <= crop.Max.Y && maxY >= crop.Min.Y &&
+                   minZ <= crop.Max.Z && maxZ >= crop.Min.Z;
+        }
+        catch (Autodesk.Revit.Exceptions.ApplicationException)
+        {
+            return true;
+        }
+    }
+
+    private static IEnumerable<XYZ> Corners(BoundingBoxXYZ box)
+    {
+        XYZ min = box.Min;
+        XYZ max = box.Max;
+        Transform transform = box.Transform;
+        for (int x = 0; x < 2; x++)
+        {
+            for (int y = 0; y < 2; y++)
+            {
+                for (int z = 0; z < 2; z++)
+                {
+                    var point = new XYZ(
+                        x == 0 ? min.X : max.X,
+                        y == 0 ? min.Y : max.Y,
+                        z == 0 ? min.Z : max.Z);
+                    yield return transform.OfPoint(point);
+                }
             }
         }
     }

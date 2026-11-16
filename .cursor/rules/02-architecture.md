@@ -17,6 +17,8 @@ Shared UI lives in `CommandUi`. Shared mesh + glTF write lives in `ViewExporter`
 - Hidden worksets
 - Non-model categories, types, and `RevitLinkInstance`
 
+Then add pipe, duct, cable tray, and conduit runs, fittings, and accessories that pass the same checks. A fitting with no view bounding box is still included when its model bounding box intersects the view crop.
+
 ## Color (3D shaded, last matching filter wins)
 Use **surface / fill** colors, never projection-line color, as mesh albedo.
 
@@ -29,7 +31,11 @@ View filters are tested on the element the filter is assigned to. Every fitting 
 
 ## Geometry and glTF
 - `element.get_Geometry(new Options { View = view })`
-- Triangulate solids/meshes (Coarse 0.50, Medium 0.55, Fine 0.65), feet → meters, Z-up → glTF Y-up
+- Cable tray runs stay on that view geometry. Do not replace them with a Fine solid
+- Pipe, duct, and conduit runs use the view mesh. If it is empty or paper-thin, use the placed Fine solid
+- Pipe, duct, and conduit fittings use the placed Fine solid, including nested family parts, and fall back to the view mesh only when that body is empty
+- A cable tray fitting uses the view solid when that view already shows one. Otherwise the elbow, tee, or cross is built from its connectors at the tray width and height, so the corner matches the straight run
+- Triangulate solids/meshes (Coarse 0.50, Medium 0.60, Fine 0.80), feet → meters, Z-up → glTF Y-up
 - Group by resolved color; split large color batches so xeokit-convert can process them; `SceneBuilder` → `SaveGLB` / `SaveGLTF`
 
 ## XKT
@@ -42,4 +48,4 @@ node --max-old-space-size=16384 convert2xkt.js -s "<glb>" -o "<xkt>" -m "<metada
 Detect the CLI before conversion. Missing tool message: `npm install -g @xeokit/xeokit-convert`.
 
 ## IFC
-Load Revit's IFC setups from `Autodesk.IFC.Export.UI` or `Revit.IFC.Export` (in-session, built-in, and document-saved when those can be read). Missing saved setups must not block the built-in list. Before `document.Export`, apply the same `ColorResolver` colors used by glTF (system-type material / fill, not pipe physical material). After export, patch `IfcStyledItem` / `IfcColourRgb` by IFC GlobalId (22-char) or Revit UniqueId, never by Mark/ElementId. Shared fitting `IfcMappedItem` geometry is cloned per color so elbows on different systems do not keep the family metal style. Snapshot the IFC, then roll back temporary materials. Export with the file name **without** extension, `ActiveViewId` as the numeric view id, tessellation **0.8**, and retry without `FilterViewId` if the file is empty. For that export only, set the 3D view to Fine detail (including when a view template locks it) so pipe, duct, cable tray, and conduit runs and fittings are written as solids, then restore the view.
+Load Revit's IFC setups from `Autodesk.IFC.Export.UI` or `Revit.IFC.Export` (in-session, built-in, and document-saved when those can be read). Missing saved setups must not block the built-in list. Before `document.Export`, apply the same `ColorResolver` colors used by glTF: view filter, surface override, MEP system type, then instance material, type material, and the material inside the family. After export, patch `IfcStyledItem` / `IfcColourRgb` by IFC GlobalId (22-char) or Revit UniqueId, never by Mark/ElementId. Shared fitting `IfcMappedItem` geometry is cloned per color so elbows on different systems do not keep the family metal style. Snapshot the IFC, then roll back temporary materials. Export with the file name **without** extension, `ActiveViewId` as the numeric view id, tessellation **0.8**, and retry without `FilterViewId` if the file is empty. For that export only, set pipe, duct, cable tray, and conduit fitting categories to Fine detail so the elbows are written, then restore the overrides. Cable tray runs and fittings are replaced for that export only with a thin open channel (about 8 mm wall), not a filled box. A curved fitting follows that curve; a straight fitting stays straight. The open section turns with the bend, so an L stays a thin channel instead of a filled solid. The profile matches the connected tray, and each end reaches into the run so the joint is closed. Hidden originals are left out of the IFC, so the filled family solid is not written with the thin channel. Duct fitting ends reach into the ducts the same way. Duct fittings are replaced for that export only with a solid of the connected duct's cross-section. A curved duct elbow keeps that section through the turn, including a riser, and a straight fitting stays straight. The stand-ins use the fitting or run color and are deleted when the export transaction ends. glTF and XKT do the same: fittings use the placed Fine solid, including nested family parts, and a cable tray run uses `get_Geometry` for that view.

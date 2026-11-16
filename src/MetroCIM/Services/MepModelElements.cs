@@ -22,6 +22,40 @@ internal static class MepModelElements
         BuiltInCategory.OST_ConduitFitting
     ];
 
+    public static readonly BuiltInCategory[] FittingCategories =
+    [
+        BuiltInCategory.OST_PipeFitting,
+        BuiltInCategory.OST_DuctFitting,
+        BuiltInCategory.OST_CableTrayFitting,
+        BuiltInCategory.OST_ConduitFitting
+    ];
+
+    public static bool IsCableTrayRun(Element element) =>
+        CategoryOf(element) == BuiltInCategory.OST_CableTray;
+
+    public static bool IsCableTrayFitting(Element element) =>
+        CategoryOf(element) == BuiltInCategory.OST_CableTrayFitting ||
+        CategoryNameHas(element, "Cable Tray", "Fitting");
+
+    public static bool IsDuctFitting(Element element) =>
+        CategoryOf(element) == BuiltInCategory.OST_DuctFitting ||
+        CategoryNameHas(element, "Duct", "Fitting");
+
+    public static bool IsFitting(Element element)
+    {
+        if (IsCableTrayFitting(element))
+            return true;
+
+        BuiltInCategory category = CategoryOf(element);
+        foreach (BuiltInCategory candidate in FittingCategories)
+        {
+            if (category == candidate)
+                return true;
+        }
+
+        return false;
+    }
+
     public static bool IsRunOrFitting(Element element)
     {
         BuiltInCategory category = BuiltInCategory.INVALID;
@@ -54,5 +88,45 @@ internal static class MepModelElements
         }
 
         return false;
+    }
+
+    private static bool CategoryNameHas(Element element, string first, string second)
+    {
+        string name;
+        try
+        {
+            name = element.Category?.Name ?? string.Empty;
+        }
+        catch (Autodesk.Revit.Exceptions.ApplicationException)
+        {
+            return false;
+        }
+
+        return name.Contains(first, StringComparison.OrdinalIgnoreCase) &&
+               name.Contains(second, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static BuiltInCategory CategoryOf(Element element)
+    {
+        try
+        {
+            if (element.Category is not null)
+                return element.Category.BuiltInCategory;
+        }
+        catch (Autodesk.Revit.Exceptions.ApplicationException)
+        {
+        }
+
+        if (element.Category is null)
+            return BuiltInCategory.INVALID;
+
+        try
+        {
+            return (BuiltInCategory)element.Category.Id.Value;
+        }
+        catch (InvalidCastException)
+        {
+            return BuiltInCategory.INVALID;
+        }
     }
 }

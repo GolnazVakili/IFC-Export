@@ -52,6 +52,14 @@ public sealed class IfcAppearanceApplier
         return colorsByIfcGuid;
     }
 
+    public static void Index(
+        Dictionary<string, ResolvedAppearance> colorsByIfcGuid,
+        Element element,
+        ResolvedAppearance appearance)
+    {
+        IndexGuids(colorsByIfcGuid, element, appearance);
+    }
+
     public static void HarvestStoredGuids(
         Document document,
         View view,

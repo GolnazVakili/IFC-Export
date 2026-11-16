@@ -4,6 +4,13 @@ using System.Numerics;
 
 namespace MetroCIM.Services;
 
+public readonly record struct CableTrayConnectorLeg(
+    XYZ Origin,
+    XYZ Inward,
+    XYZ WidthDirection,
+    double Width,
+    double Height);
+
 public sealed class GeometryBuilder
 {
     private const double FeetToMeters = 0.3048;
@@ -24,19 +31,152 @@ public sealed class GeometryBuilder
             _ => 0.80
         };
 
-        bool mepBody = MepModelElements.IsRunOrFitting(element);
         TriangleMesh? viewMesh = BuildFromGeometry(element, GetViewGeometry(element, view), lod, usePlacedGeometry: false);
-        if (!mepBody)
+        if (MepModelElements.IsCableTrayFitting(element))
+            return CableTrayFittingMesh(element, viewMesh, lod);
+
+        if (MepModelElements.IsCableTrayRun(element) || !MepModelElements.IsRunOrFitting(element))
             return viewMesh;
 
-        if (viewMesh is { IsEmpty: false, IsPaperThin: false })
+        if (!MepModelElements.IsFitting(element) && viewMesh is { IsEmpty: false, IsPaperThin: false })
             return viewMesh;
 
-        TriangleMesh? body = BuildFromGeometry(element, GetFineGeometry(element), 0.80, usePlacedGeometry: true);
-        if (body is { IsEmpty: false })
+        TriangleMesh body = viewMesh is { IsEmpty: false, IsPaperThin: false }
+            ? viewMesh
+            : BuildFromGeometry(element, GetFineGeometry(element), 0.80, usePlacedGeometry: true) ?? new TriangleMesh();
+        if (MepModelElements.IsFitting(element))
+            AddNestedFittingGeometry(element, body, 0.80, 0);
+
+        if (!body.IsEmpty)
             return body;
 
         return viewMesh;
+    }
+
+    private TriangleMesh? CableTrayFittingMesh(Element element, TriangleMesh? viewMesh, double lod)
+    {
+        if (viewMesh is { IsEmpty: false, IsPaperThin: false })
+            return viewMesh;
+
+        var connectors = new TriangleMesh();
+        AddCableTrayConnectorBody(element, connectors);
+        if (!connectors.IsEmpty)
+            return connectors;
+
+        TriangleMesh? family = BuildFromGeometry(element, GetFineGeometry(element), lod, usePlacedGeometry: true);
+        if (family is not null)
+            AddNestedFittingGeometry(element, family, lod, 0);
+        if (family is { IsEmpty: false })
+            return family;
+
+        return viewMesh;
+    }
+
+    public bool HasSolidViewBody(Element element, View3D view)
+    {
+        TriangleMesh? viewMesh = BuildFromGeometry(element, GetViewGeometry(element, view), 0.80, usePlacedGeometry: false);
+        return viewMesh is { IsEmpty: false, IsPaperThin: false };
+    }
+
+    public static bool TryGetCableTrayConnectors(
+        Element element,
+        out IReadOnlyList<CableTrayConnectorLeg> legs,
+        out XYZ bend)
+    {
+        legs = [];
+        bend = XYZ.Zero;
+        if (element is not FamilyInstance instance)
+            return false;
+
+        ConnectorSet? connectors;
+        try
+        {
+            connectors = instance.MEPModel?.ConnectorManager?.Connectors;
+        }
+        catch (Autodesk.Revit.Exceptions.ApplicationException)
+        {
+            return false;
+        }
+
+        if (connectors is null || connectors.Size < 2)
+            return false;
+
+        var found = new List<CableTrayConnectorLeg>();
+        foreach (Connector connector in connectors)
+        {
+            try
+            {
+                if (connector.Width <= 1e-6 || connector.Height <= 1e-6)
+                    continue;
+
+                Transform frame = connector.CoordinateSystem;
+                found.Add(new CableTrayConnectorLeg(
+                    connector.Origin,
+                    -frame.BasisZ,
+                    frame.BasisX,
+                    connector.Width,
+                    connector.Height));
+            }
+            catch (Autodesk.Revit.Exceptions.ApplicationException)
+            {
+            }
+        }
+
+        if (found.Count < 2)
+            return false;
+
+        bend = found.Count == 2
+            ? FromGltf(CableTrayFittingBody.BendOf(
+                ToGltf(found[0].Origin),
+                ToGltf(found[0].Inward),
+                ToGltf(found[1].Origin),
+                ToGltf(found[1].Inward)))
+            : BendFromLegs(instance, found);
+        legs = found;
+        return true;
+    }
+
+    private void AddCableTrayConnectorBody(Element element, TriangleMesh mesh)
+    {
+        if (!TryGetCableTrayConnectors(element, out IReadOnlyList<CableTrayConnectorLeg> legs, out XYZ bend))
+            return;
+
+        var fittingLegs = new List<FittingLeg>(legs.Count);
+        foreach (CableTrayConnectorLeg leg in legs)
+        {
+            fittingLegs.Add(new FittingLeg(
+                ToGltf(leg.Origin),
+                ToGltf(leg.WidthDirection),
+                (float)(leg.Width * FeetToMeters),
+                (float)(leg.Height * FeetToMeters)));
+        }
+
+        mesh.Append(CableTrayFittingBody.Build(fittingLegs, ToGltf(bend)));
+    }
+
+    private static XYZ BendFromLegs(FamilyInstance instance, IReadOnlyList<CableTrayConnectorLeg> legs)
+    {
+        try
+        {
+            if (instance.Location is LocationPoint point)
+                return point.Point;
+        }
+        catch (Autodesk.Revit.Exceptions.ApplicationException)
+        {
+        }
+
+        XYZ sum = XYZ.Zero;
+        foreach (CableTrayConnectorLeg leg in legs)
+            sum += leg.Origin;
+        return sum / legs.Count;
+    }
+
+    private static XYZ FromGltf(Vector3 point)
+    {
+        return new XYZ(
+            point.X / FeetToMeters,
+            -point.Z / FeetToMeters,
+            point.Y / FeetToMeters);
     }
 
     private TriangleMesh? BuildFromGeometry(
@@ -90,13 +230,53 @@ public sealed class GeometryBuilder
             return element.get_Geometry(new Options
             {
                 ComputeReferences = false,
-                IncludeNonVisibleObjects = false,
+                IncludeNonVisibleObjects = true,
                 DetailLevel = ViewDetailLevel.Fine
             });
         }
         catch (Autodesk.Revit.Exceptions.ApplicationException)
         {
             return null;
+        }
+    }
+
+    private void AddNestedFittingGeometry(Element element, TriangleMesh mesh, double lod, int depth)
+    {
+        if (depth >= 8 || element is not FamilyInstance instance)
+            return;
+
+        ICollection<ElementId> nestedIds;
+        try
+        {
+            nestedIds = instance.GetSubComponentIds();
+        }
+        catch (Autodesk.Revit.Exceptions.ApplicationException)
+        {
+            return;
+        }
+
+        foreach (ElementId nestedId in nestedIds)
+        {
+            if (element.Document.GetElement(nestedId) is not Element nested)
+                continue;
+
+            GeometryElement? geometry = GetFineGeometry(nested);
+            if (geometry is not null)
+            {
+                _document = nested.Document;
+                _usePlacedGeometry = true;
+                try
+                {
+                    Collect(geometry, Transform.Identity, mesh, lod);
+                }
+                finally
+                {
+                    _document = null;
+                    _usePlacedGeometry = false;
+                }
+            }
+
+            AddNestedFittingGeometry(nested, mesh, lod, depth + 1);
         }
     }
 
