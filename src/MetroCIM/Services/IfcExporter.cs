@@ -159,8 +159,8 @@ public sealed class IfcExporter
             ExportProxySet trayProxies = view is View3D view3D
                 ? CableTrayFittingProxies.Add(document, view3D, colorsByIfcGuid)
                 : new ExportProxySet([], []);
-            ExportProxySet ductProxies = view is View3D ductView
-                ? DuctFittingProxies.Add(document, ductView, colorsByIfcGuid)
+            ExportProxySet flowProxies = view is View3D flowView
+                ? FlowFittingProxies.Add(document, flowView, colorsByIfcGuid)
                 : new ExportProxySet([], []);
             try
             {
@@ -177,7 +177,7 @@ public sealed class IfcExporter
             finally
             {
                 CableTrayFittingProxies.Remove(document, view, trayProxies);
-                DuctFittingProxies.Remove(document, view, ductProxies);
+                FlowFittingProxies.Remove(document, view, flowProxies);
                 RestoreFittingDetail(view, detail);
                 RestoreLightSources(view, lightSourcesHidden);
             }
@@ -296,21 +296,31 @@ public sealed class IfcExporter
 
     private readonly record struct FittingDetailSnapshot(
         IList<ElementId>? TemplateParameters,
+        ViewDetailLevel? DetailLevel,
         IReadOnlyList<(ElementId Id, OverrideGraphicSettings Settings)> Overrides);
 
     private static FittingDetailSnapshot UseFineFittingDetail(View view)
     {
         IList<ElementId>? templateParameters = null;
+        ViewDetailLevel? detailLevel = null;
         var saved = new List<(ElementId Id, OverrideGraphicSettings Settings)>();
         try
         {
             if (view.ViewTemplateId != ElementId.InvalidElementId)
             {
                 templateParameters = view.GetNonControlledTemplateParameterIds().ToList();
-                var graphics = new ElementId(BuiltInParameter.VIS_GRAPHICS_MODEL);
-                if (!templateParameters.Any(id => id.Value == graphics.Value))
+                ElementId[] needed =
+                [
+                    new ElementId(BuiltInParameter.VIS_GRAPHICS_MODEL),
+                    new ElementId(BuiltInParameter.VIEW_DETAIL_LEVEL)
+                ];
+                var missing = needed
+                    .Where(id => !templateParameters.Any(existing => existing.Value == id.Value))
+                    .ToList();
+                if (missing.Count > 0)
                 {
-                    var next = new List<ElementId>(templateParameters) { graphics };
+                    var next = new List<ElementId>(templateParameters);
+                    next.AddRange(missing);
                     view.SetNonControlledTemplateParameterIds(next);
                 }
                 else
@@ -319,7 +329,18 @@ public sealed class IfcExporter
                 }
             }
 
-            foreach (BuiltInCategory category in MepModelElements.FittingCategories)
+            try
+            {
+                detailLevel = view.DetailLevel;
+                if (detailLevel != ViewDetailLevel.Fine)
+                    view.DetailLevel = ViewDetailLevel.Fine;
+            }
+            catch (Autodesk.Revit.Exceptions.ApplicationException)
+            {
+                detailLevel = null;
+            }
+
+            foreach (BuiltInCategory category in MepModelElements.IfcSolidCategories)
             {
                 Category? cat = Category.GetCategory(view.Document, category);
                 if (cat is null)
@@ -331,12 +352,14 @@ public sealed class IfcExporter
                 updated.SetDetailLevel(ViewDetailLevel.Fine);
                 view.SetCategoryOverrides(cat.Id, updated);
             }
+
+            view.Document.Regenerate();
         }
         catch (Autodesk.Revit.Exceptions.ApplicationException)
         {
         }
 
-        return new FittingDetailSnapshot(templateParameters, saved);
+        return new FittingDetailSnapshot(templateParameters, detailLevel, saved);
     }
 
     private static void RestoreFittingDetail(View view, FittingDetailSnapshot snapshot)
@@ -345,6 +368,8 @@ public sealed class IfcExporter
         {
             foreach ((ElementId id, OverrideGraphicSettings settings) in snapshot.Overrides)
                 view.SetCategoryOverrides(id, settings);
+            if (snapshot.DetailLevel is ViewDetailLevel detailLevel && detailLevel != ViewDetailLevel.Fine)
+                view.DetailLevel = detailLevel;
             if (snapshot.TemplateParameters is not null)
                 view.SetNonControlledTemplateParameterIds(snapshot.TemplateParameters);
         }
@@ -374,6 +399,7 @@ public sealed class IfcExporter
 
         options.AddOption("ActiveViewId", view.Id.Value.ToString());
         options.AddOption("VisibleElementsOfCurrentView", "true");
+        options.AddOption("ExportSolidModelRep", "true");
         options.AddOption("TessellationLevelOfDetail", "0.8");
         options.AddOption("IFCFileType", IfcExportPath.FileTypeOption(path));
 

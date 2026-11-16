@@ -30,6 +30,27 @@ internal static class MepModelElements
         BuiltInCategory.OST_ConduitFitting
     ];
 
+    /// <summary>
+    /// Categories Revit's IFC exporter should write from Fine solids: ducts, pipes,
+    /// conduits, and their fittings. Cable tray runs stay on the view detail level.
+    /// </summary>
+    public static readonly BuiltInCategory[] IfcSolidCategories =
+    [
+        BuiltInCategory.OST_PipeCurves,
+        BuiltInCategory.OST_FlexPipeCurves,
+        BuiltInCategory.OST_PipeFitting,
+        BuiltInCategory.OST_PipeAccessory,
+        BuiltInCategory.OST_PlaceHolderPipes,
+        BuiltInCategory.OST_DuctCurves,
+        BuiltInCategory.OST_FlexDuctCurves,
+        BuiltInCategory.OST_DuctFitting,
+        BuiltInCategory.OST_DuctAccessory,
+        BuiltInCategory.OST_PlaceHolderDucts,
+        BuiltInCategory.OST_Conduit,
+        BuiltInCategory.OST_ConduitFitting,
+        BuiltInCategory.OST_CableTrayFitting
+    ];
+
     public static bool IsCableTrayRun(Element element) =>
         CategoryOf(element) == BuiltInCategory.OST_CableTray;
 
@@ -37,9 +58,20 @@ internal static class MepModelElements
         CategoryOf(element) == BuiltInCategory.OST_CableTrayFitting ||
         CategoryNameHas(element, "Cable Tray", "Fitting");
 
-    public static bool IsDuctFitting(Element element) =>
-        CategoryOf(element) == BuiltInCategory.OST_DuctFitting ||
-        CategoryNameHas(element, "Duct", "Fitting");
+    public static bool IsFlowFitting(Element element)
+    {
+        BuiltInCategory category = CategoryOf(element);
+        if (category is BuiltInCategory.OST_DuctFitting or
+            BuiltInCategory.OST_PipeFitting or
+            BuiltInCategory.OST_ConduitFitting)
+        {
+            return true;
+        }
+
+        return CategoryNameHas(element, "Duct", "Fitting") ||
+               CategoryNameHas(element, "Pipe", "Fitting") ||
+               CategoryNameHas(element, "Conduit", "Fitting");
+    }
 
     public static bool IsFitting(Element element)
     {

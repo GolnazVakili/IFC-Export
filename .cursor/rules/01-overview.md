@@ -25,7 +25,7 @@ glTF / XKT:
 Tab **Automation**, panel **Export**. Logo above the label:
 - **glTF** — writes `.glb` or `.gltf` only
 - **XKT** — writes intermediate `.glb` and `metadata.json` next to the chosen `.xkt`, then converts
-- **IFC** — writes `.ifc` using the selected Revit IFC setup. Fitting categories are set to Fine for that export only; cable tray runs stay on the view’s detail level
+- **IFC** — writes `.ifc` using the selected Revit IFC setup. Duct, pipe, and conduit runs are written by Revit's IFC exporter at Fine detail for that export only. Their fittings follow the connector centerline through the bend and reach into the runs. Cable tray runs stay on the view’s detail level and are replaced with a thin channel
 
 ## Non-goals
 - No import
