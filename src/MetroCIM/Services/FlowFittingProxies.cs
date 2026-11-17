@@ -21,12 +21,22 @@ internal static class FlowFittingProxies
         var colors = new ColorResolver();
         colors.Bind(view);
 
+        double minimumLength = document.Application.ShortCurveTolerance;
         foreach (Element element in new VisibilityService().GetVisibleElements(document, view))
         {
             if (!MepModelElements.IsFlowFitting(element))
                 continue;
 
-            IList<Solid> solids = CreateReplacement(element);
+            IList<Solid> solids;
+            try
+            {
+                solids = CreateReplacement(element, minimumLength);
+            }
+            catch (Autodesk.Revit.Exceptions.ApplicationException)
+            {
+                continue;
+            }
+
             if (solids.Count == 0)
                 continue;
 
@@ -79,7 +89,7 @@ internal static class FlowFittingProxies
         bool Round,
         double Reach);
 
-    private static IList<Solid> CreateReplacement(Element element)
+    private static IList<Solid> CreateReplacement(Element element, double minimumLength)
     {
         if (!TryGetEnds(element, out IReadOnlyList<FlowEnd> ends))
             return [];
@@ -93,7 +103,8 @@ internal static class FlowFittingProxies
                 DuctFittingPath.Elbow(oriented[0], oriented[1], (float)ends[0].Reach, (float)ends[1].Reach),
                 ends[0],
                 ends[1],
-                SegmentOverlap);
+                SegmentOverlap,
+                minimumLength);
         }
         else
         {
@@ -110,7 +121,8 @@ internal static class FlowFittingProxies
                     DuctFittingPath.Branch(oriented[i], junction, (float)ends[i].Reach),
                     ends[i],
                     ends[i],
-                    fuse);
+                    fuse,
+                    minimumLength);
             }
         }
 
@@ -122,9 +134,13 @@ internal static class FlowFittingProxies
         IReadOnlyList<Vector3> path,
         FlowEnd start,
         FlowEnd end,
-        double overlap)
+        double overlap,
+        double minimumLength)
     {
         if (path.Count < 2)
+            return;
+
+        if (TrySmoothBend(solids, start, end, minimumLength))
             return;
 
         bool round = start.Round && end.Round;
@@ -133,7 +149,7 @@ internal static class FlowFittingProxies
             double width = Lerp(start.Width, end.Width, t);
             double height = Lerp(start.Height, end.Height, t);
             return round ? CircleSection(width * 0.5) : RectangleSection(width, height);
-        });
+        }, minimumLength);
         if (lofted is not null)
         {
             solids.Add(lofted);
@@ -161,10 +177,57 @@ internal static class FlowFittingProxies
             if (i < frames.Count - 1)
                 length += overlap;
 
-            Solid? solid = Extrude(origin, axis, ToXyz(frame.Right), ToXyz(frame.Up), width, height, length, start.Round && end.Round);
+            Solid? solid = Extrude(
+                origin,
+                axis,
+                ToXyz(frame.Right),
+                ToXyz(frame.Up),
+                width,
+                height,
+                length,
+                start.Round && end.Round,
+                minimumLength);
             if (solid is not null)
                 solids.Add(solid);
         }
+    }
+
+    private static bool TrySmoothBend(List<Solid> solids, FlowEnd start, FlowEnd end, double minimumLength)
+    {
+        if (start.Round != end.Round)
+            return false;
+
+        if (Math.Abs(start.Width - end.Width) > 1e-4 || Math.Abs(start.Height - end.Height) > 1e-4)
+            return false;
+
+        if (!DuctFittingPath.TryBend(
+                ToOriented(start),
+                ToOriented(end),
+                (float)start.Reach,
+                (float)end.Reach,
+                out DuctFittingPath.BendCurve bend))
+        {
+            return false;
+        }
+
+        Vector3 width = ToVector(start.WidthDirection);
+        Vector3 rise = Vector3.Cross(ToVector(start.Outward), width);
+        if (rise.LengthSquared() < 1e-8f)
+            return false;
+
+        IReadOnlyList<(double Across, double Rise)> profile = start.Round
+            ? CircleSection(start.Width * 0.5)
+            : RectangleSection(start.Width, start.Height);
+        IReadOnlyList<Solid> swept = FittingSolids.SweepProfiles(
+            bend,
+            Vector3.Normalize(rise),
+            [profile],
+            minimumLength);
+        if (swept.Count == 0)
+            return false;
+
+        solids.AddRange(swept);
+        return true;
     }
 
     private static bool TryGetEnds(Element element, out IReadOnlyList<FlowEnd> ends)
@@ -346,11 +409,14 @@ internal static class FlowFittingProxies
         double width,
         double height,
         double length,
-        bool round)
+        bool round,
+        double minimumLength)
     {
         try
         {
-            if (length < 1e-4 || width <= 1e-6 || height <= 1e-6)
+            if (!ShortCurve.IsLongEnough(length, minimumLength) ||
+                !ShortCurve.IsLongEnough(width, minimumLength) ||
+                !ShortCurve.IsLongEnough(height, minimumLength))
                 return null;
 
             IList<XYZ> profile = round
@@ -361,7 +427,7 @@ internal static class FlowFittingProxies
             {
                 XYZ a = start + profile[i];
                 XYZ b = start + profile[(i + 1) % profile.Count];
-                if (a.DistanceTo(b) < 1e-6)
+                if (!ShortCurve.IsLongEnough(a.DistanceTo(b), minimumLength))
                     return null;
 
                 lines.Add(Line.CreateBound(a, b));

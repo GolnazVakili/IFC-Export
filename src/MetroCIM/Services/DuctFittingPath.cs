@@ -71,6 +71,13 @@ public static class DuctFittingPath
         return Vector3.Dot(axis, toTarget) >= 0 ? axis : -axis;
     }
 
+    public readonly record struct BendCurve(
+        Vector3 Start,
+        Vector3 ArcStart,
+        Vector3 ArcPoint,
+        Vector3 ArcEnd,
+        Vector3 End);
+
     public static IReadOnlyList<Vector3> Elbow(OrientedEnd start, OrientedEnd end, float startReach, float endReach)
     {
         Vector3 travelStart = PointToward(start.Origin, start.Inward, end.Origin);
@@ -87,6 +94,25 @@ public static class DuctFittingPath
         extended.AddRange(center);
         extended.Add(center[^1] + (Normalize(travelEnd) * endReach));
         return extended;
+    }
+
+    public static bool TryBend(OrientedEnd start, OrientedEnd end, float startReach, float endReach, out BendCurve curve)
+    {
+        curve = default;
+        Vector3 travelStart = PointToward(start.Origin, start.Inward, end.Origin);
+        Vector3 travelEnd = -PointToward(end.Origin, end.Outward, start.Origin);
+        if (!TryArc(start.Origin, travelStart, end.Origin, travelEnd, out ArcTurn arc))
+            return false;
+
+        startReach = Math.Max(startReach, 0f);
+        endReach = Math.Max(endReach, 0f);
+        curve = new BendCurve(
+            arc.Start - (Normalize(travelStart) * startReach),
+            arc.Start,
+            arc.Mid,
+            arc.End,
+            arc.End + (Normalize(travelEnd) * endReach));
+        return true;
     }
 
     public static IReadOnlyList<Vector3>? Fillet(
@@ -114,6 +140,31 @@ public static class DuctFittingPath
             return reverse;
 
         return forward ?? reverse;
+    }
+
+    private readonly record struct ArcTurn(Vector3 Start, Vector3 End, Vector3 Mid);
+
+    private static bool TryArc(
+        Vector3 originA,
+        Vector3 travelA,
+        Vector3 originB,
+        Vector3 travelB,
+        out ArcTurn arc)
+    {
+        arc = default;
+        travelA = Normalize(travelA);
+        travelB = Normalize(travelB);
+        if (Vector3.Dot(travelA, travelB) > 0.985f)
+            return false;
+
+        Vector3 turn = Vector3.Cross(travelA, travelB);
+        if (turn.LengthSquared() < 1e-6f)
+            return false;
+
+        if (TryOneArc(originA, travelA, originB, travelB, Normalize(turn), out arc))
+            return true;
+
+        return TryOneArc(originA, travelA, originB, travelB, -Normalize(turn), out arc);
     }
 
     public static Vector3 Junction(IReadOnlyList<OrientedEnd> ends)
@@ -213,6 +264,43 @@ public static class DuctFittingPath
         points[0] = originA;
         points[^1] = originB;
         return points;
+    }
+
+    private static bool TryOneArc(
+        Vector3 originA,
+        Vector3 travelA,
+        Vector3 originB,
+        Vector3 travelB,
+        Vector3 normal,
+        out ArcTurn arc)
+    {
+        arc = default;
+        Vector3 sideA = Vector3.Cross(normal, travelA);
+        Vector3 sideB = Vector3.Cross(normal, travelB);
+        if (sideA.LengthSquared() < 1e-8f || sideB.LengthSquared() < 1e-8f)
+            return false;
+
+        if (!TryIntersect(originA, Normalize(sideA), originB, Normalize(sideB), out Vector3 center))
+            return false;
+
+        Vector3 from = originA - center;
+        Vector3 to = originB - center;
+        float radius = from.Length();
+        float other = to.Length();
+        if (radius < 1e-4f || Math.Abs(radius - other) > radius * 0.2f)
+            return false;
+
+        float cosine = Math.Clamp(Vector3.Dot(from, to) / (radius * other), -1f, 1f);
+        float angle = MathF.Acos(cosine);
+        if (angle < 0.05f)
+            return false;
+
+        Vector3 step = Rotate(from, normal, Math.Min(angle * 0.25f, 0.2f)) - from;
+        if (step.LengthSquared() < 1e-8f || Vector3.Dot(Normalize(step), travelA) <= 0.5f)
+            return false;
+
+        arc = new ArcTurn(originA, originB, center + Rotate(from, normal, angle * 0.5f));
+        return true;
     }
 
     private static bool StartsAlong(IReadOnlyList<Vector3> path, Vector3 travel)

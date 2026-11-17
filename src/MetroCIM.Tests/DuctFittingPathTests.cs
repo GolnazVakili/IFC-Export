@@ -69,6 +69,23 @@ public sealed class DuctFittingPathTests
         Assert.True(DuctFittingPath.Reach(1f, 0.5f, 20f) < 2f);
     }
 
+    [Fact]
+    public void ARiserBendIsATangentArcBetweenTheRuns()
+    {
+        OrientedEnd start = End(new Vector3(2, 0, 0), Vector3.UnitX, Vector3.UnitY, 1.2f, 0.4f);
+        OrientedEnd finish = End(new Vector3(0, 0, 2), Vector3.UnitZ, Vector3.UnitY, 1.2f, 0.4f);
+
+        Assert.True(DuctFittingPath.TryBend(start, finish, 0.2f, 0.2f, out DuctFittingPath.BendCurve bend));
+        Assert.True(bend.Start.X > bend.ArcStart.X);
+        Assert.True(bend.End.Z > bend.ArcEnd.Z);
+        Vector3 chord = bend.ArcEnd - bend.ArcStart;
+        Vector3 toMid = bend.ArcPoint - bend.ArcStart;
+        Assert.True(Vector3.Cross(chord, toMid).Length() > 0.05f);
+        Assert.InRange(bend.ArcPoint.X, 0f, 2f);
+        Assert.InRange(bend.ArcPoint.Z, 0f, 2f);
+        Assert.True(Math.Abs(bend.ArcPoint.Y) < 0.05f);
+    }
+
     private static OrientedEnd End(Vector3 origin, Vector3 outward, Vector3 width, float widthSize, float height)
     {
         Vector3 away = Vector3.Normalize(outward);

@@ -38,12 +38,16 @@ public sealed class ExportIfcCommand : IExternalCommand
                 using (var progress = new ExportProgress(Title, 1))
                 {
                     progress.UseMarquee("Exporting IFC" + Environment.NewLine + "IFC4 Reference View");
-                    fallback = IfcExporter.ExportVisibleView(document, view, fallbackPath);
+                    fallback = IfcExporter.ExportVisibleView(
+                        document,
+                        view,
+                        fallbackPath,
+                        status => progress.UseMarquee(status));
                 }
 
                 if (fallback.Success)
                 {
-                    CommandUi.Show(Title, $"IFC saved\n{fallback.Path}\n\nRevit IFC setup: {fallback.SetupName}");
+                    CommandUi.Show(Title, SavedMessage(fallback));
                     return Result.Succeeded;
                 }
 
@@ -68,12 +72,17 @@ public sealed class ExportIfcCommand : IExternalCommand
             using (var progress = new ExportProgress(Title, 1))
             {
                 progress.UseMarquee("Exporting IFC" + Environment.NewLine + setupName);
-                outcome = exporter.Export(document, view, outputPath, setupName);
+                outcome = exporter.Export(
+                    document,
+                    view,
+                    outputPath,
+                    setupName,
+                    status => progress.UseMarquee(status));
             }
 
             if (outcome.Success)
             {
-                CommandUi.Show(Title, $"IFC saved\n{outcome.Path}\n\nRevit IFC setup: {outcome.SetupName}");
+                CommandUi.Show(Title, SavedMessage(outcome));
                 return Result.Succeeded;
             }
 
@@ -86,5 +95,14 @@ public sealed class ExportIfcCommand : IExternalCommand
             CommandUi.Show(Title, $"IFC export failed.\n{ex.Message}");
             return Result.Failed;
         }
+    }
+
+    private static string SavedMessage(IfcExportOutcome outcome)
+    {
+        string message = $"IFC saved\n{outcome.Path}\n\nRevit IFC setup: {outcome.SetupName}";
+        if (!string.IsNullOrWhiteSpace(outcome.Notice))
+            message += "\n\n" + outcome.Notice;
+
+        return message;
     }
 }

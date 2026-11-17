@@ -24,9 +24,19 @@ internal static class CableTrayFittingProxies
         var colors = new ColorResolver();
         colors.Bind(view);
 
+        double minimumLength = document.Application.ShortCurveTolerance;
         foreach (Element element in new VisibilityService().GetVisibleElements(document, view))
         {
-            IList<Solid> solids = CreateReplacement(element);
+            IList<Solid> solids;
+            try
+            {
+                solids = CreateReplacement(element, minimumLength);
+            }
+            catch (Autodesk.Revit.Exceptions.ApplicationException)
+            {
+                continue;
+            }
+
             if (solids.Count == 0)
                 continue;
 
@@ -92,10 +102,10 @@ internal static class CableTrayFittingProxies
         }
     }
 
-    private static IList<Solid> CreateReplacement(Element element)
+    private static IList<Solid> CreateReplacement(Element element, double minimumLength)
     {
         if (element is CableTray tray)
-            return CreateRun(tray);
+            return CreateRun(tray, minimumLength);
 
         if (!MepModelElements.IsCableTrayFitting(element) || !TryGetLegs(element, out IReadOnlyList<TrayLeg> legs))
             return [];
@@ -108,7 +118,8 @@ internal static class CableTrayFittingProxies
                 solids,
                 DuctFittingPath.Elbow(oriented[0], oriented[1], (float)legs[0].Reach, (float)legs[1].Reach),
                 legs[0],
-                legs[1]);
+                legs[1],
+                minimumLength);
             return solids;
         }
 
@@ -119,7 +130,12 @@ internal static class CableTrayFittingProxies
             if (!DuctFittingPath.Meets(oriented[i], junction, span))
                 continue;
 
-            AddPath(solids, DuctFittingPath.Branch(oriented[i], junction, (float)legs[i].Reach), legs[i], legs[i]);
+            AddPath(
+                solids,
+                DuctFittingPath.Branch(oriented[i], junction, (float)legs[i].Reach),
+                legs[i],
+                legs[i],
+                minimumLength);
         }
 
         if (solids.Count > 0)
@@ -130,7 +146,8 @@ internal static class CableTrayFittingProxies
             solids,
             DuctFittingPath.Elbow(oriented[first], oriented[second], (float)legs[first].Reach, (float)legs[second].Reach),
             legs[first],
-            legs[second]);
+            legs[second],
+            minimumLength);
         return solids;
     }
 
@@ -335,9 +352,17 @@ internal static class CableTrayFittingProxies
         return (first, second);
     }
 
-    private static void AddPath(List<Solid> solids, IReadOnlyList<Vector3> path, TrayLeg start, TrayLeg end)
+    private static void AddPath(
+        List<Solid> solids,
+        IReadOnlyList<Vector3> path,
+        TrayLeg start,
+        TrayLeg end,
+        double minimumLength)
     {
         if (path.Count < 2)
+            return;
+
+        if (TrySmoothChannel(solids, start, end, minimumLength))
             return;
 
         Vector3 step = path[1] - path[0];
@@ -358,7 +383,7 @@ internal static class CableTrayFittingProxies
             return sectionHeight <= wall * 2.5
                 ? PlateSection(sectionWidth, wall)
                 : ChannelSection(sectionWidth, sectionHeight, wall);
-        });
+        }, minimumLength);
         if (lofted is not null)
         {
             solids.Add(lofted);
@@ -391,10 +416,34 @@ internal static class CableTrayFittingProxies
             if (Vector3.Dot(thin, preferred) < 0)
                 thin = -thin;
             preferred = thin;
-            Solid? solid = ExtrudeChannel(origin, axis, ToXyz(thin), width, height, length);
+            Solid? solid = ExtrudeChannel(origin, axis, ToXyz(thin), width, height, length, minimumLength);
             if (solid is not null)
                 solids.Add(solid);
         }
+    }
+
+    private static bool TrySmoothChannel(
+        List<Solid> solids,
+        TrayLeg start,
+        TrayLeg end,
+        double minimumLength)
+    {
+        if (Math.Abs(start.Width - end.Width) > 1e-4 || Math.Abs(start.Height - end.Height) > 1e-4)
+            return false;
+
+        if (!DuctFittingPath.TryBend(ToOriented(start), ToOriented(end), (float)start.Reach, (float)end.Reach, out DuctFittingPath.BendCurve bend))
+            return false;
+
+        double wall = Math.Min(WallFeet, Math.Min(start.Width, start.Height) * 0.45);
+        IReadOnlyList<IReadOnlyList<(double Across, double Rise)>> profiles = start.Height <= wall * 2.5
+            ? [PlateSection(start.Width, wall)]
+            : ChannelPlates(start.Width, start.Height, wall);
+        IReadOnlyList<Solid> swept = FittingSolids.SweepProfiles(bend, ToVector(start.Opening), profiles, minimumLength);
+        if (swept.Count == 0)
+            return false;
+
+        solids.AddRange(swept);
+        return true;
     }
 
     private static OrientedEnd ToOriented(TrayLeg leg) =>
@@ -413,7 +462,7 @@ internal static class CableTrayFittingProxies
 
     private static XYZ ToXyz(Vector3 point) => new(point.X, point.Y, point.Z);
 
-    private static IList<Solid> CreateRun(CableTray tray)
+    private static IList<Solid> CreateRun(CableTray tray, double minimumLength)
     {
         Curve? curve;
         try
@@ -453,10 +502,10 @@ internal static class CableTrayFittingProxies
         {
             XYZ step = points[i] - points[i - 1];
             double length = step.GetLength();
-            if (length < 1e-4)
+            if (!ShortCurve.IsLongEnough(length, minimumLength))
                 continue;
 
-            Solid? solid = ExtrudeChannel(points[i - 1], step.Normalize(), up, tray.Width, tray.Height, length);
+            Solid? solid = ExtrudeChannel(points[i - 1], step.Normalize(), up, tray.Width, tray.Height, length, minimumLength);
             if (solid is not null)
                 solids.Add(solid);
         }
@@ -464,10 +513,22 @@ internal static class CableTrayFittingProxies
         return solids;
     }
 
-    private static Solid? ExtrudeChannel(XYZ start, XYZ axis, XYZ up, double width, double height, double length)
+    private static Solid? ExtrudeChannel(
+        XYZ start,
+        XYZ axis,
+        XYZ up,
+        double width,
+        double height,
+        double length,
+        double minimumLength)
     {
         try
         {
+            if (!ShortCurve.IsLongEnough(length, minimumLength) ||
+                !ShortCurve.IsLongEnough(width, minimumLength) ||
+                !ShortCurve.IsLongEnough(height, minimumLength))
+                return null;
+
             if (Math.Abs(axis.DotProduct(up)) > 0.99)
                 up = Math.Abs(axis.Z) < 0.9 ? XYZ.BasisZ : XYZ.BasisX;
 
@@ -487,7 +548,7 @@ internal static class CableTrayFittingProxies
             {
                 XYZ a = start + profile[i];
                 XYZ b = start + profile[(i + 1) % profile.Count];
-                if (a.DistanceTo(b) < 1e-6)
+                if (!ShortCurve.IsLongEnough(a.DistanceTo(b), minimumLength))
                     return null;
                 lines.Add(Line.CreateBound(a, b));
             }
@@ -501,6 +562,33 @@ internal static class CableTrayFittingProxies
             return null;
         }
     }
+
+    private static IReadOnlyList<IReadOnlyList<(double Across, double Rise)>> ChannelPlates(
+        double width,
+        double height,
+        double wall)
+    {
+        double halfWidth = width * 0.5;
+        double halfHeight = height * 0.5;
+        return
+        [
+            PlateRectangle(-halfWidth, halfWidth, -halfHeight, -halfHeight + wall),
+            PlateRectangle(-halfWidth, -halfWidth + wall, -halfHeight, halfHeight),
+            PlateRectangle(halfWidth - wall, halfWidth, -halfHeight, halfHeight)
+        ];
+    }
+
+    private static IReadOnlyList<(double Across, double Rise)> PlateRectangle(
+        double left,
+        double right,
+        double bottom,
+        double top) =>
+    [
+        (left, bottom),
+        (right, bottom),
+        (right, top),
+        (left, top)
+    ];
 
     private static IReadOnlyList<(double Across, double Rise)> PlateSection(double width, double thickness)
     {

@@ -97,7 +97,12 @@ public sealed class IfcExporter
         return true;
     }
 
-    public IfcExportOutcome Export(Document document, View view, string path, string setupName)
+    public IfcExportOutcome Export(
+        Document document,
+        View view,
+        string path,
+        string setupName,
+        Action<string>? status = null)
     {
         object config = _setups.First(s => s.Name == setupName).Config;
         ElementId activeViewId = view.Id;
@@ -111,10 +116,14 @@ public sealed class IfcExporter
                 "The selected IFC setup could not be applied to Revit's IFC export options.");
         }
 
-        return WriteIfc(document, view, path, setupName, options);
+        return WriteIfc(document, view, path, setupName, options, status);
     }
 
-    public static IfcExportOutcome ExportVisibleView(Document document, View view, string path)
+    public static IfcExportOutcome ExportVisibleView(
+        Document document,
+        View view,
+        string path,
+        Action<string>? status = null)
     {
         const string setupName = "IFC4 Reference View";
         var options = new IFCExportOptions
@@ -126,10 +135,48 @@ public sealed class IfcExporter
         options.AddOption("VisibleElementsOfCurrentView", "true");
         options.AddOption("UseActiveViewGeometry", "true");
         options.AddOption("ExportRoomsInView", "true");
-        return WriteIfc(document, view, path, setupName, options);
+        return WriteIfc(document, view, path, setupName, options, status);
     }
 
     private static IfcExportOutcome WriteIfc(
+        Document document,
+        View view,
+        string path,
+        string setupName,
+        IFCExportOptions options,
+        Action<string>? status)
+    {
+        string? shortCurveError = null;
+        NormalizeOptions(options, view, path);
+        foreach (double tessellation in ShortCurve.TessellationAttempts)
+        {
+            status?.Invoke(shortCurveError is null
+                ? "Exporting IFC" + Environment.NewLine + setupName
+                : "Exporting IFC" + Environment.NewLine + setupName + Environment.NewLine + "Retrying at lower detail");
+            options.AddOption("TessellationLevelOfDetail", ShortCurve.FormatTessellation(tessellation));
+            IfcExportOutcome outcome = WriteIfcAttempt(document, view, path, setupName, options);
+            if (outcome.Success)
+            {
+                return tessellation < ShortCurve.PreferredTessellation
+                    ? outcome with { Notice = ShortCurve.LowerDetailNote(tessellation) }
+                    : outcome;
+            }
+
+            if (!ShortCurve.IsExportFailure(outcome.Error))
+                return outcome;
+
+            shortCurveError = outcome.Error;
+            DeletePartialExport(path);
+        }
+
+        return IfcExportOutcome.Failed(
+            setupName,
+            "A curve in the model is shorter than Revit's tolerance (about 1/32 inch). " +
+            "High detail and the lower fallbacks were rejected.\n" +
+            shortCurveError);
+    }
+
+    private static IfcExportOutcome WriteIfcAttempt(
         Document document,
         View view,
         string path,
@@ -139,7 +186,6 @@ public sealed class IfcExporter
         string folder = Path.GetDirectoryName(path)!;
         string name = IfcExportPath.ExportName(path);
         Directory.CreateDirectory(folder);
-        NormalizeOptions(options, view, path);
 
         using var transaction = new Transaction(document, "Export IFC");
         FailureHandlingOptions failure = transaction.GetFailureHandlingOptions();
@@ -400,7 +446,6 @@ public sealed class IfcExporter
         options.AddOption("ActiveViewId", view.Id.Value.ToString());
         options.AddOption("VisibleElementsOfCurrentView", "true");
         options.AddOption("ExportSolidModelRep", "true");
-        options.AddOption("TessellationLevelOfDetail", "0.8");
         options.AddOption("IFCFileType", IfcExportPath.FileTypeOption(path));
 
         try
@@ -420,6 +465,23 @@ public sealed class IfcExporter
     {
         options.FilterViewId = ElementId.InvalidElementId;
         options.AddOption("VisibleElementsOfCurrentView", "true");
+    }
+
+    private static void DeletePartialExport(string path)
+    {
+        string? folder = Path.GetDirectoryName(path);
+        if (string.IsNullOrWhiteSpace(folder))
+            return;
+
+        string name = IfcExportPath.ExportName(path);
+        string extension = Path.GetExtension(path);
+        if (string.IsNullOrWhiteSpace(extension))
+            extension = ".ifc";
+
+        foreach (string candidate in IfcExportPath.Candidates(folder, name, extension))
+            TryDelete(candidate);
+
+        TryDelete(Path.Combine(folder, name + ".metro-cim-ifc.tmp"));
     }
 
     private static void TryDelete(string? path)
@@ -993,10 +1055,15 @@ public sealed class IfcExporter
     }
 }
 
-public readonly record struct IfcExportOutcome(bool Success, string SetupName, string? Path, string? Error)
+public readonly record struct IfcExportOutcome(
+    bool Success,
+    string SetupName,
+    string? Path,
+    string? Error,
+    string? Notice = null)
 {
-    public static IfcExportOutcome Succeeded(string setupName, string path) =>
-        new(true, setupName, path, null);
+    public static IfcExportOutcome Succeeded(string setupName, string path, string? notice = null) =>
+        new(true, setupName, path, null, notice);
 
     public static IfcExportOutcome Failed(string setupName, string error) =>
         new(false, setupName, null, error);
