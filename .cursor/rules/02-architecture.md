@@ -1,6 +1,6 @@
 # Architecture
 
-Keep types small: `VisibilityService`, `ColorResolver`, `MepSystemTypeColor`, `GeometryBuilder`, `GltfExporter`, `XktConverter`, `ViewExporter`, `MetadataExporter`, `IfcExporter`, `IfcAppearanceApplier`, `IfcColorPatcher`. Do not merge XKT conversion into the glTF writer.
+Keep types small: `VisibilityService`, `ColorResolver`, `MepSystemTypeColor`, `GeometryBuilder`, `GltfExporter`, `XktConverter`, `ViewExporter`, `MetadataExporter`, `IfcExporter`, `IfcAppearanceApplier`, `IfcColorPatcher`, `FlowFittingProxies`, `DuctFittingPath`. Do not merge XKT conversion into the glTF writer.
 
 ## Commands
 - `ExportGltfCommand` — validate `View3D`, pick `.glb`/`.gltf`, build meshes, save glTF

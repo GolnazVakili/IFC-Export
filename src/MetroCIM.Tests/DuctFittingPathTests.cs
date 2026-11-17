@@ -43,6 +43,24 @@ public sealed class DuctFittingPathTests
     }
 
     [Fact]
+    public void AReversedTangentDoesNotBalloonOutsideTheCorner()
+    {
+        var start = new OrientedEnd(new Vector3(2, 0, 0), -Vector3.UnitX, Vector3.UnitX, Vector3.UnitY, 1f, 0.5f, false);
+        var end = new OrientedEnd(new Vector3(0, 0, 2), -Vector3.UnitZ, Vector3.UnitZ, Vector3.UnitY, 1f, 0.5f, false);
+
+        IReadOnlyList<Vector3> path = DuctFittingPath.Elbow(start, end, 0.1f, 0.1f);
+
+        Assert.All(path, point =>
+        {
+            Assert.InRange(point.X, -0.3f, 2.3f);
+            Assert.InRange(point.Z, -0.3f, 2.3f);
+            Assert.True(Math.Abs(point.Y) < 0.05f);
+        });
+        Vector3 middle = path[path.Count / 2];
+        Assert.True(middle.X < 1.6f && middle.Z < 1.6f);
+    }
+
+    [Fact]
     public void ReachStopsAtTheConnectedRun()
     {
         float reach = DuctFittingPath.Reach(1.2f, 0.6f, 0.5f);

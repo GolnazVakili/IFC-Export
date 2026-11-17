@@ -61,23 +61,59 @@ public static class DuctFittingPath
         return reach;
     }
 
+    public static Vector3 PointToward(Vector3 origin, Vector3 direction, Vector3 target)
+    {
+        Vector3 axis = Normalize(direction);
+        Vector3 toTarget = target - origin;
+        if (toTarget.LengthSquared() < 1e-8f)
+            return axis;
+
+        return Vector3.Dot(axis, toTarget) >= 0 ? axis : -axis;
+    }
+
     public static IReadOnlyList<Vector3> Elbow(OrientedEnd start, OrientedEnd end, float startReach, float endReach)
     {
-        IReadOnlyList<Vector3> center = CableTrayFittingBody.Centerline(
-            start.Origin,
-            start.Inward,
-            end.Origin,
-            end.Outward);
+        Vector3 travelStart = PointToward(start.Origin, start.Inward, end.Origin);
+        Vector3 travelEnd = -PointToward(end.Origin, end.Outward, start.Origin);
+        IReadOnlyList<Vector3> center = Fillet(start.Origin, travelStart, end.Origin, travelEnd)
+            ?? CableTrayFittingBody.Centerline(start.Origin, travelStart, end.Origin, travelEnd);
         if (center.Count == 0)
             return center;
 
         var extended = new List<Vector3>(center.Count + 2)
         {
-            center[0] + (Normalize(start.Outward) * startReach)
+            center[0] - (Normalize(travelStart) * startReach)
         };
         extended.AddRange(center);
-        extended.Add(center[^1] + (Normalize(end.Outward) * endReach));
+        extended.Add(center[^1] + (Normalize(travelEnd) * endReach));
         return extended;
+    }
+
+    public static IReadOnlyList<Vector3>? Fillet(
+        Vector3 originA,
+        Vector3 travelA,
+        Vector3 originB,
+        Vector3 travelB,
+        int steps = 8)
+    {
+        travelA = Normalize(travelA);
+        travelB = Normalize(travelB);
+        if (Vector3.Dot(travelA, travelB) > 0.985f)
+            return [originA, originB];
+
+        Vector3 turn = Vector3.Cross(travelA, travelB);
+        if (turn.LengthSquared() < 1e-6f)
+            return null;
+
+        IReadOnlyList<Vector3>? forward = TryFillet(originA, travelA, originB, travelB, Normalize(turn), steps);
+        if (forward is not null && StartsAlong(forward, travelA))
+            return forward;
+
+        IReadOnlyList<Vector3>? reverse = TryFillet(originA, travelA, originB, travelB, -Normalize(turn), steps);
+        if (reverse is not null && StartsAlong(reverse, travelA))
+            return reverse;
+
+        return forward ?? reverse;
     }
 
     public static Vector3 Junction(IReadOnlyList<OrientedEnd> ends)
@@ -138,6 +174,89 @@ public static class DuctFittingPath
         end.Origin,
         junction
     ];
+
+    private static IReadOnlyList<Vector3>? TryFillet(
+        Vector3 originA,
+        Vector3 travelA,
+        Vector3 originB,
+        Vector3 travelB,
+        Vector3 normal,
+        int steps)
+    {
+        Vector3 sideA = Vector3.Cross(normal, travelA);
+        Vector3 sideB = Vector3.Cross(normal, travelB);
+        if (sideA.LengthSquared() < 1e-8f || sideB.LengthSquared() < 1e-8f)
+            return null;
+
+        if (!TryIntersect(originA, Normalize(sideA), originB, Normalize(sideB), out Vector3 center))
+            return null;
+
+        Vector3 from = originA - center;
+        Vector3 to = originB - center;
+        float radius = from.Length();
+        float other = to.Length();
+        if (radius < 1e-4f || Math.Abs(radius - other) > radius * 0.2f)
+            return null;
+
+        float cosine = Math.Clamp(Vector3.Dot(from, to) / (radius * other), -1f, 1f);
+        float angle = MathF.Acos(cosine);
+        if (angle < 0.05f)
+            return [originA, originB];
+
+        var points = new List<Vector3>(steps + 1);
+        for (int i = 0; i <= steps; i++)
+        {
+            float t = angle * i / steps;
+            points.Add(center + Rotate(from, normal, t));
+        }
+
+        points[0] = originA;
+        points[^1] = originB;
+        return points;
+    }
+
+    private static bool StartsAlong(IReadOnlyList<Vector3> path, Vector3 travel)
+    {
+        if (path.Count < 2)
+            return false;
+
+        Vector3 step = path[1] - path[0];
+        return step.LengthSquared() > 1e-8f && Vector3.Dot(Normalize(step), Normalize(travel)) > 0.5f;
+    }
+
+    private static bool TryIntersect(
+        Vector3 originA,
+        Vector3 directionA,
+        Vector3 originB,
+        Vector3 directionB,
+        out Vector3 hit)
+    {
+        Vector3 between = originB - originA;
+        float a = Vector3.Dot(directionA, directionA);
+        float b = Vector3.Dot(directionA, directionB);
+        float c = Vector3.Dot(directionB, directionB);
+        float d = Vector3.Dot(directionA, between);
+        float e = Vector3.Dot(directionB, between);
+        float denom = (a * c) - (b * b);
+        if (Math.Abs(denom) < 1e-6f)
+        {
+            hit = default;
+            return false;
+        }
+
+        float distance = ((d * c) - (b * e)) / denom;
+        hit = originA + (directionA * distance);
+        return true;
+    }
+
+    private static Vector3 Rotate(Vector3 vector, Vector3 axis, float radians)
+    {
+        float cosine = MathF.Cos(radians);
+        float sine = MathF.Sin(radians);
+        return (vector * cosine)
+            + (Vector3.Cross(axis, vector) * sine)
+            + (axis * Vector3.Dot(axis, vector) * (1f - cosine));
+    }
 
     private static float DistanceToRay(Vector3 point, Vector3 origin, Vector3 direction)
     {

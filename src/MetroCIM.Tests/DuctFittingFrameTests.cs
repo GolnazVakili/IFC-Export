@@ -22,6 +22,16 @@ public sealed class DuctFittingFrameTests
     }
 
     [Fact]
+    public void AHorizontalElbowKeepsTheOpeningUp()
+    {
+        IReadOnlyList<SweepFrame> frames = DuctFittingFrames.Sweep(
+            [new Vector3(2, 0, 0), new Vector3(0, 0, 0), new Vector3(0, 2, 0)],
+            Vector3.UnitY);
+
+        Assert.All(frames, frame => Assert.True(frame.Up.Z > 0.7f));
+    }
+
+    [Fact]
     public void AnLBendTurnsTheThinSideWithTheTray()
     {
         IReadOnlyList<SweepFrame> frames = DuctFittingFrames.Sweep(

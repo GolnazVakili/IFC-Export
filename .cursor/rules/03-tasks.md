@@ -10,7 +10,7 @@ Work in this order. Ask before skipping.
 - [x] `VisibilityService`, `ColorResolver`, `GeometryBuilder`, `GltfExporter`, `XktConverter`, `IfcExporter`
 - [x] Detect missing Node.js / xeokit-convert before XKT conversion
 - [x] Project/assembly/add-in name **MetroCIM**. Setup display name **Export**. `dist\Export-Setup.exe`
-- [x] Pipe, duct, cable tray, and conduit fittings export as placed solids. Cable tray runs keep the 3D view geometry
+- [x] IFC duct, pipe, and conduit fittings follow the connected run through the bend. Cable trays are a thin channel. glTF and XKT fittings use the placed solid
 
 ## Remaining
 - [x] 1. Keep glTF, XKT, and IFC as separate ribbon commands; do not recombine them

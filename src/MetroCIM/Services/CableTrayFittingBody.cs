@@ -63,6 +63,23 @@ public static class CableTrayFittingBody
         return extended;
     }
 
+    public static Vector3 AlignOpening(Vector3 preferred, Vector3 axis)
+    {
+        Vector3 direction = SafeNormalize(axis);
+        Vector3 projected = preferred - (direction * Vector3.Dot(preferred, direction));
+        if (projected.LengthSquared() < 1e-8f)
+        {
+            Vector3 fallback = Math.Abs(direction.Z) < 0.9f ? Vector3.UnitZ : Vector3.UnitX;
+            projected = fallback - (direction * Vector3.Dot(fallback, direction));
+        }
+
+        Vector3 opening = Vector3.Normalize(projected);
+        if (preferred.LengthSquared() > 1e-8f && Vector3.Dot(opening, preferred) < 0)
+            opening = -opening;
+
+        return opening;
+    }
+
     public static Vector3 BendOf(Vector3 originA, Vector3 inwardA, Vector3 originB, Vector3 inwardB)
     {
         Vector3 directionA = SafeNormalize(inwardA);

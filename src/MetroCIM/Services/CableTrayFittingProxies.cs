@@ -38,14 +38,15 @@ internal static class CableTrayFittingProxies
             ResolvedAppearance appearance = colors.Resolve(element, view);
             CopyMaterial(element, shape);
             IfcAppearanceApplier.Index(colorsByIfcGuid, shape, appearance);
+            SuppressOriginal(element);
             hidden.Add(element.Id);
         }
 
-        if (hidden.Count > 0)
+        foreach (ElementId id in hidden)
         {
             try
             {
-                view.HideElements(hidden);
+                view.HideElements([id]);
             }
             catch (Autodesk.Revit.Exceptions.ApplicationException)
             {
@@ -96,118 +97,284 @@ internal static class CableTrayFittingProxies
         if (element is CableTray tray)
             return CreateRun(tray);
 
-        if (!MepModelElements.IsCableTrayFitting(element) ||
-            !GeometryBuilder.TryGetCableTrayConnectors(element, out IReadOnlyList<CableTrayConnectorLeg> legs, out XYZ bend))
-        {
+        if (!MepModelElements.IsCableTrayFitting(element) || !TryGetLegs(element, out IReadOnlyList<TrayLeg> legs))
             return [];
-        }
 
-        TryConnectedTrayProfile(element, legs[0], out double width, out double height, out XYZ up);
-        double reach = JointReach(width, height);
+        List<OrientedEnd> oriented = legs.Select(ToOriented).ToList();
         var solids = new List<Solid>();
         if (legs.Count == 2)
         {
-            AddPath(solids, ConnectedCurve(legs[0], legs[1], reach), up, width, height);
+            AddPath(
+                solids,
+                DuctFittingPath.Elbow(oriented[0], oriented[1], (float)legs[0].Reach, (float)legs[1].Reach),
+                legs[0],
+                legs[1]);
             return solids;
         }
 
-        foreach (CableTrayConnectorLeg leg in legs)
+        Vector3 junction = DuctFittingPath.Junction(oriented);
+        float span = DuctFittingPath.Span(oriented);
+        for (int i = 0; i < legs.Count; i++)
         {
-            XYZ toward = bend - leg.Origin;
-            if (toward.GetLength() < 1e-4)
+            if (!DuctFittingPath.Meets(oriented[i], junction, span))
                 continue;
 
-            AddPath(solids, [leg.Origin - (leg.Inward * reach), leg.Origin, bend], up, width, height);
+            AddPath(solids, DuctFittingPath.Branch(oriented[i], junction, (float)legs[i].Reach), legs[i], legs[i]);
         }
 
+        if (solids.Count > 0)
+            return solids;
+
+        (int first, int second) = FarthestPair(legs);
+        AddPath(
+            solids,
+            DuctFittingPath.Elbow(oriented[first], oriented[second], (float)legs[first].Reach, (float)legs[second].Reach),
+            legs[first],
+            legs[second]);
         return solids;
     }
 
-    private static void TryConnectedTrayProfile(
-        Element fitting,
-        CableTrayConnectorLeg fallback,
-        out double width,
-        out double height,
-        out XYZ up)
-    {
-        width = fallback.Width;
-        height = fallback.Height;
-        up = fallback.Inward.CrossProduct(fallback.WidthDirection);
-        up = up.GetLength() < 1e-8 ? XYZ.BasisZ : up.Normalize();
-        if (fitting is not FamilyInstance instance)
-            return;
+    private readonly record struct TrayLeg(
+        XYZ Origin,
+        XYZ Outward,
+        XYZ Opening,
+        double Width,
+        double Height,
+        double Reach);
 
+    private readonly record struct RawTray(
+        XYZ Origin,
+        XYZ Axis,
+        XYZ Opening,
+        double Width,
+        double Height,
+        XYZ IntoTray,
+        bool HasTray);
+
+    private static bool TryGetLegs(Element element, out IReadOnlyList<TrayLeg> legs)
+    {
+        legs = [];
+        if (element is not FamilyInstance instance)
+            return false;
+
+        ConnectorSet? connectors;
         try
         {
-            ConnectorSet? connectors = instance.MEPModel?.ConnectorManager?.Connectors;
-            if (connectors is null)
-                return;
+            connectors = instance.MEPModel?.ConnectorManager?.Connectors;
+        }
+        catch (Autodesk.Revit.Exceptions.ApplicationException)
+        {
+            return false;
+        }
 
-            foreach (Connector connector in connectors)
+        if (connectors is null || connectors.Size < 2)
+            return false;
+
+        List<RawTray> raw = ReadConnectors(connectors, endOnly: true);
+        if (raw.Count < 2)
+            raw = ReadConnectors(connectors, endOnly: false);
+        if (raw.Count < 2)
+            return false;
+
+        InheritSize(raw);
+        raw = raw.Where(item => item.Width > 1e-6 && item.Height > 1e-6).ToList();
+        if (raw.Count < 2)
+            return false;
+
+        XYZ center = XYZ.Zero;
+        foreach (RawTray item in raw)
+            center += item.Origin;
+        center /= raw.Count;
+
+        var found = new List<TrayLeg>(raw.Count);
+        foreach (RawTray item in raw)
+        {
+            bool hasDirection = item.HasTray && item.IntoTray.GetLength() > 1e-4;
+            Vector3 outward = hasDirection
+                ? Vector3.Normalize(ToVector(item.IntoTray))
+                : DuctFittingPath.Outward(ToVector(item.Origin), ToVector(item.Axis), ToVector(center));
+            var away = new XYZ(outward.X, outward.Y, outward.Z);
+            Vector3 opening = CableTrayFittingBody.AlignOpening(ToVector(item.Opening), outward);
+            double distance = hasDirection ? Math.Max(0, item.IntoTray.DotProduct(away)) : 0;
+            if (distance > Math.Max(item.Width, item.Height))
+                distance = 0;
+            double reach = DuctFittingPath.Reach((float)item.Width, (float)item.Height, (float)distance);
+            found.Add(new TrayLeg(
+                item.Origin,
+                away,
+                new XYZ(opening.X, opening.Y, opening.Z),
+                item.Width,
+                item.Height,
+                reach));
+        }
+
+        legs = found;
+        return found.Count >= 2;
+    }
+
+    private static List<RawTray> ReadConnectors(ConnectorSet connectors, bool endOnly)
+    {
+        var raw = new List<RawTray>();
+        foreach (Connector connector in connectors)
+        {
+            try
             {
-                foreach (Connector reference in connector.AllRefs)
-                {
-                    if (reference.Owner is not CableTray tray)
-                        continue;
+                if (endOnly && connector.ConnectorType != ConnectorType.End)
+                    continue;
 
+                Transform frame = connector.CoordinateSystem;
+                double width = connector.Width;
+                double height = connector.Height;
+                XYZ opening = frame.BasisY;
+                bool hasTray = TryHostTray(connector, ref width, ref height, ref opening, out XYZ intoTray);
+                raw.Add(new RawTray(connector.Origin, frame.BasisZ, opening, width, height, intoTray, hasTray));
+            }
+            catch (Autodesk.Revit.Exceptions.ApplicationException)
+            {
+            }
+        }
+
+        return raw;
+    }
+
+    private static void InheritSize(List<RawTray> raw)
+    {
+        double width = 0;
+        double height = 0;
+        foreach (RawTray item in raw)
+        {
+            width = Math.Max(width, item.Width);
+            height = Math.Max(height, item.Height);
+        }
+
+        if (width <= 1e-6 || height <= 1e-6)
+            return;
+
+        for (int i = 0; i < raw.Count; i++)
+        {
+            RawTray item = raw[i];
+            if (item.Width > 1e-6 && item.Height > 1e-6)
+                continue;
+
+            raw[i] = item with
+            {
+                Width = item.Width > 1e-6 ? item.Width : width,
+                Height = item.Height > 1e-6 ? item.Height : height
+            };
+        }
+    }
+
+    private static bool TryHostTray(
+        Connector connector,
+        ref double width,
+        ref double height,
+        ref XYZ opening,
+        out XYZ intoTray)
+    {
+        intoTray = XYZ.Zero;
+        try
+        {
+            foreach (Connector reference in connector.AllRefs)
+            {
+                if (reference.Owner is not CableTray tray)
+                    continue;
+                if (connector.Owner is not null && tray.Id == connector.Owner.Id)
+                    continue;
+
+                if (tray.Width > 1e-6)
                     width = tray.Width;
+                if (tray.Height > 1e-6)
                     height = tray.Height;
-                    up = tray.CurveNormal;
-                    return;
+                try
+                {
+                    if (tray.CurveNormal.GetLength() > 1e-8)
+                        opening = tray.CurveNormal.Normalize();
                 }
+                catch (Autodesk.Revit.Exceptions.ApplicationException)
+                {
+                }
+
+                if (tray.Location is LocationCurve location && location.Curve is Curve curve)
+                {
+                    XYZ end0 = curve.GetEndPoint(0);
+                    XYZ end1 = curve.GetEndPoint(1);
+                    XYZ near = connector.Origin.DistanceTo(end0) <= connector.Origin.DistanceTo(end1) ? end0 : end1;
+                    XYZ far = near.IsAlmostEqualTo(end0) ? end1 : end0;
+                    intoTray = far - near;
+                }
+
+                return true;
             }
         }
         catch (Autodesk.Revit.Exceptions.ApplicationException)
         {
         }
+
+        return false;
     }
 
-    private static IReadOnlyList<XYZ> ConnectedCurve(
-        CableTrayConnectorLeg start,
-        CableTrayConnectorLeg end,
-        double reach)
+    private static (int First, int Second) FarthestPair(IReadOnlyList<TrayLeg> legs)
     {
-        IReadOnlyList<Vector3> path = CableTrayFittingBody.ExtendIntoRuns(
-            CableTrayFittingBody.Centerline(
-                ToVector(start.Origin),
-                ToVector(start.Inward),
-                ToVector(end.Origin),
-                ToVector(-end.Inward)),
-            ToVector(-start.Inward),
-            ToVector(-end.Inward),
-            (float)reach);
-        return path.Select(point => new XYZ(point.X, point.Y, point.Z)).ToList();
+        int first = 0;
+        int second = 1;
+        double farthest = 0;
+        for (int i = 0; i < legs.Count; i++)
+        {
+            for (int j = i + 1; j < legs.Count; j++)
+            {
+                double distance = legs[i].Origin.DistanceTo(legs[j].Origin);
+                if (distance > farthest)
+                {
+                    farthest = distance;
+                    first = i;
+                    second = j;
+                }
+            }
+        }
+
+        return (first, second);
     }
 
-    private static double JointReach(double width, double height) =>
-        Math.Clamp(Math.Min(width, height) * 0.2, 0.04, 0.12);
-
-    private static Vector3 ToVector(XYZ point) => new((float)point.X, (float)point.Y, (float)point.Z);
-
-    private static void AddPath(List<Solid> solids, IReadOnlyList<XYZ> path, XYZ up, double width, double height)
+    private static void AddPath(List<Solid> solids, IReadOnlyList<Vector3> path, TrayLeg start, TrayLeg end)
     {
         if (path.Count < 2)
             return;
 
-        XYZ opening = up.GetLength() < 1e-8 ? XYZ.BasisZ : up.Normalize();
-        XYZ startStep = path[1] - path[0];
-        if (startStep.GetLength() < 1e-4)
+        Vector3 step = path[1] - path[0];
+        if (step.Length() < 1e-4f)
             return;
 
-        XYZ startAxis = startStep.Normalize();
-        XYZ across = startAxis.CrossProduct(opening);
-        if (across.GetLength() < 1e-8)
-            across = Perpendicular(XYZ.BasisX, startAxis);
-        else
-            across = across.Normalize();
+        Vector3 opening = CableTrayFittingBody.AlignOpening(ToVector(start.Opening), Vector3.Normalize(step));
+        Vector3 across = Vector3.Cross(Vector3.Normalize(step), opening);
+        if (across.LengthSquared() < 1e-8f)
+            return;
 
-        IReadOnlyList<SweepFrame> frames = DuctFittingFrames.Sweep(
-            path.Select(point => new Vector3((float)point.X, (float)point.Y, (float)point.Z)).ToList(),
-            new Vector3((float)across.X, (float)across.Y, (float)across.Z));
+        across = Vector3.Normalize(across);
+        Solid? lofted = FittingSolids.LoftSection(path, across, t =>
+        {
+            double sectionWidth = Lerp(start.Width, end.Width, t);
+            double sectionHeight = Lerp(start.Height, end.Height, t);
+            double wall = Math.Min(WallFeet, Math.Min(sectionWidth, sectionHeight) * 0.45);
+            return sectionHeight <= wall * 2.5
+                ? PlateSection(sectionWidth, wall)
+                : ChannelSection(sectionWidth, sectionHeight, wall);
+        });
+        if (lofted is not null)
+        {
+            solids.Add(lofted);
+            return;
+        }
 
+        IReadOnlyList<SweepFrame> frames = DuctFittingFrames.Sweep(path, across);
+        bool sameSize = Math.Abs(start.Width - end.Width) < 1e-4 &&
+                        Math.Abs(start.Height - end.Height) < 1e-4;
+        Vector3 preferred = opening;
         for (int i = 0; i < frames.Count; i++)
         {
             SweepFrame frame = frames[i];
+            double t = !sameSize && frames.Count > 1 ? i / (double)(frames.Count - 1) : 0;
+            double width = Lerp(start.Width, end.Width, t);
+            double height = Lerp(start.Height, end.Height, t);
             var axis = new XYZ(frame.Axis.X, frame.Axis.Y, frame.Axis.Z);
             var origin = new XYZ(frame.Start.X, frame.Start.Y, frame.Start.Z);
             double length = frame.Length;
@@ -220,12 +387,31 @@ internal static class CableTrayFittingProxies
             if (i < frames.Count - 1)
                 length += JointOverlap;
 
-            var thin = new XYZ(frame.Up.X, frame.Up.Y, frame.Up.Z);
-            Solid? solid = ExtrudeChannel(origin, axis, thin, width, height, length);
+            Vector3 thin = frame.Up;
+            if (Vector3.Dot(thin, preferred) < 0)
+                thin = -thin;
+            preferred = thin;
+            Solid? solid = ExtrudeChannel(origin, axis, ToXyz(thin), width, height, length);
             if (solid is not null)
                 solids.Add(solid);
         }
     }
+
+    private static OrientedEnd ToOriented(TrayLeg leg) =>
+        new(
+            ToVector(leg.Origin),
+            ToVector(leg.Outward),
+            -ToVector(leg.Outward),
+            Vector3.Cross(ToVector(leg.Outward), ToVector(leg.Opening)),
+            (float)leg.Width,
+            (float)leg.Height,
+            false);
+
+    private static double Lerp(double start, double end, double t) => start + ((end - start) * t);
+
+    private static Vector3 ToVector(XYZ point) => new((float)point.X, (float)point.Y, (float)point.Z);
+
+    private static XYZ ToXyz(Vector3 point) => new(point.X, point.Y, point.Z);
 
     private static IList<Solid> CreateRun(CableTray tray)
     {
@@ -316,6 +502,36 @@ internal static class CableTrayFittingProxies
         }
     }
 
+    private static IReadOnlyList<(double Across, double Rise)> PlateSection(double width, double thickness)
+    {
+        double halfWidth = width * 0.5;
+        double halfThickness = thickness * 0.5;
+        return
+        [
+            (-halfWidth, -halfThickness),
+            (halfWidth, -halfThickness),
+            (halfWidth, halfThickness),
+            (-halfWidth, halfThickness)
+        ];
+    }
+
+    private static IReadOnlyList<(double Across, double Rise)> ChannelSection(double width, double height, double wall)
+    {
+        double halfWidth = width * 0.5;
+        double halfHeight = height * 0.5;
+        return
+        [
+            (-halfWidth, -halfHeight),
+            (halfWidth, -halfHeight),
+            (halfWidth, halfHeight),
+            (halfWidth - wall, halfHeight),
+            (halfWidth - wall, -halfHeight + wall),
+            (-halfWidth + wall, -halfHeight + wall),
+            (-halfWidth + wall, halfHeight),
+            (-halfWidth, halfHeight)
+        ];
+    }
+
     private static IList<XYZ> Plate(XYZ right, XYZ up, double width, double thickness)
     {
         double halfWidth = width * 0.5;
@@ -374,6 +590,25 @@ internal static class CableTrayFittingProxies
         return null;
     }
 
+    private static void SuppressOriginal(Element element)
+    {
+        try
+        {
+            foreach (Parameter parameter in element.Parameters)
+            {
+                if (parameter.IsReadOnly || parameter.StorageType != StorageType.String)
+                    continue;
+
+                string? name = parameter.Definition?.Name;
+                if (name is "IfcExportAs" or "IfcExportAs [Type]")
+                    parameter.Set("DontExport");
+            }
+        }
+        catch (Autodesk.Revit.Exceptions.ApplicationException)
+        {
+        }
+    }
+
     private static void CopyMaterial(Element source, Element target)
     {
         try
@@ -391,15 +626,4 @@ internal static class CableTrayFittingProxies
         }
     }
 
-    private static XYZ Perpendicular(XYZ preferred, XYZ axis)
-    {
-        XYZ projected = preferred - (axis * preferred.DotProduct(axis));
-        if (projected.GetLength() < 1e-8)
-        {
-            XYZ fallback = Math.Abs(axis.X) < 0.9 ? XYZ.BasisX : XYZ.BasisY;
-            projected = fallback - (axis * fallback.DotProduct(axis));
-        }
-
-        return projected.Normalize();
-    }
 }

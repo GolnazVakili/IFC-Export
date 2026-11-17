@@ -7,6 +7,23 @@ namespace MetroCIM.Tests;
 public sealed class CableTrayFittingBodyTests
 {
     [Fact]
+    public void AHorizontalRunStaysOpenUpward()
+    {
+        Vector3 opening = CableTrayFittingBody.AlignOpening(Vector3.UnitZ, Vector3.UnitX);
+
+        Assert.True(opening.Z > 0.9f);
+    }
+
+    [Fact]
+    public void AVerticalRunDoesNotStandUpAsAPlate()
+    {
+        Vector3 opening = CableTrayFittingBody.AlignOpening(Vector3.UnitZ, Vector3.UnitZ);
+
+        Assert.True(Math.Abs(opening.Z) < 0.1f);
+        Assert.True(Math.Abs(Vector3.Dot(opening, Vector3.UnitZ)) < 0.1f);
+    }
+
+    [Fact]
     public void ElbowBendIsTheIntersectionOfTheTwoLegs()
     {
         Vector3 bend = CableTrayFittingBody.BendOf(

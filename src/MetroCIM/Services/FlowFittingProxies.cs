@@ -127,6 +127,19 @@ internal static class FlowFittingProxies
         if (path.Count < 2)
             return;
 
+        bool round = start.Round && end.Round;
+        Solid? lofted = FittingSolids.LoftSection(path, ToVector(start.WidthDirection), t =>
+        {
+            double width = Lerp(start.Width, end.Width, t);
+            double height = Lerp(start.Height, end.Height, t);
+            return round ? CircleSection(width * 0.5) : RectangleSection(width, height);
+        });
+        if (lofted is not null)
+        {
+            solids.Add(lofted);
+            return;
+        }
+
         IReadOnlyList<SweepFrame> frames = DuctFittingFrames.Sweep(path, ToVector(start.WidthDirection));
         bool sameSize = Math.Abs(start.Width - end.Width) < 1e-4 &&
                         Math.Abs(start.Height - end.Height) < 1e-4;
@@ -193,12 +206,11 @@ internal static class FlowFittingProxies
         var found = new List<FlowEnd>();
         foreach (var item in raw)
         {
-            Vector3 outward = item.HasHost
-                ? DuctFittingPath.Toward(ToVector(item.Origin), ToVector(item.Axis), ToVector(item.Host))
+            Vector3 outward = item.HasHost && item.Host.GetLength() > 1e-4
+                ? Vector3.Normalize(ToVector(item.Host))
                 : DuctFittingPath.Outward(ToVector(item.Origin), ToVector(item.Axis), ToVector(center));
             var away = new XYZ(outward.X, outward.Y, outward.Z);
-            double distance = item.HasHost ? Math.Max(0, (item.Host - item.Origin).DotProduct(away)) : 0;
-            double reach = DuctFittingPath.Reach((float)item.WidthSize, (float)item.Height, (float)distance);
+            double reach = DuctFittingPath.Reach((float)item.WidthSize, (float)item.Height, 0);
             Vector3 right = DuctFittingPath.ProfileRight(ToVector(item.Width), outward);
             found.Add(new FlowEnd(
                 item.Origin,
@@ -254,9 +266,9 @@ internal static class FlowFittingProxies
         }
     }
 
-    private static bool TryHost(Connector connector, bool round, ref double width, ref double height, out XYZ near)
+    private static bool TryHost(Connector connector, bool round, ref double width, ref double height, out XYZ intoRun)
     {
-        near = XYZ.Zero;
+        intoRun = XYZ.Zero;
         try
         {
             foreach (Connector reference in connector.AllRefs)
@@ -270,8 +282,10 @@ internal static class FlowFittingProxies
                 ApplyHostSize(host, round, ref width, ref height);
                 XYZ end0 = curve.GetEndPoint(0);
                 XYZ end1 = curve.GetEndPoint(1);
-                near = connector.Origin.DistanceTo(end0) <= connector.Origin.DistanceTo(end1) ? end0 : end1;
-                return true;
+                XYZ near = connector.Origin.DistanceTo(end0) <= connector.Origin.DistanceTo(end1) ? end0 : end1;
+                XYZ far = near.IsAlmostEqualTo(end0) ? end1 : end0;
+                intoRun = far - near;
+                return intoRun.GetLength() > 1e-4;
             }
         }
         catch (Autodesk.Revit.Exceptions.ApplicationException)
@@ -360,6 +374,32 @@ internal static class FlowFittingProxies
         {
             return null;
         }
+    }
+
+    private static IReadOnlyList<(double Across, double Rise)> RectangleSection(double width, double height)
+    {
+        double halfWidth = width * 0.5;
+        double halfHeight = height * 0.5;
+        return
+        [
+            (-halfWidth, -halfHeight),
+            (halfWidth, -halfHeight),
+            (halfWidth, halfHeight),
+            (-halfWidth, halfHeight)
+        ];
+    }
+
+    private static IReadOnlyList<(double Across, double Rise)> CircleSection(double radius)
+    {
+        const int sides = 16;
+        var points = new (double Across, double Rise)[sides];
+        for (int i = 0; i < sides; i++)
+        {
+            double angle = i * Math.PI * 2 / sides;
+            points[i] = (Math.Cos(angle) * radius, Math.Sin(angle) * radius);
+        }
+
+        return points;
     }
 
     private static IList<XYZ> Rectangle(XYZ right, XYZ up, double width, double height)
